@@ -127,6 +127,86 @@ Setup pins package-runner MCP registrations to the exact installed REA version,
 installs the matching skill and on-demand references in the same plan, and adds
 `startup_timeout_sec = 30` for Codex and Grok Build.
 
+## Limit REA to one project or agent profile
+
+Setup registers REA for the whole client. For Claude Code it writes
+`mcpServers.rea` in `~/.claude.json` and installs the bundled skill under
+`~/.claude/skills`, so every project that Claude Code opens can call REA. To
+offer REA's tools only where they're wanted, use one of the routes below.
+
+Both routes control which sessions discover REA's MCP server and skill. They
+don't isolate anything. An agent running under the same OS account can still
+run a `rea` command on the shell `PATH`, start REA with `npx`, and read the other
+profile's files and REA's output. Where the separation has to hold, as in a
+clean-room reimplementation, keep REA, the target, and REA's output in a separate
+OS account or container that the other agent's account can't read.
+
+For Claude Code, check existing default-profile state before choosing either
+route. Setup is additive: a previous user-level REA registration and personal
+skill remain active in other projects. Back up the default configuration and
+REA skill first, then, with `CLAUDE_CONFIG_DIR` unset, remove the REA user
+registration with `claude mcp remove --scope user rea` and remove the known
+REA-installed `~/.claude/skills/reverse-engineer-anything` directory. Preserve
+unrelated registrations and skills. `rea uninstall` applies to other clients
+as well, so it is broader than this Claude-only migration.
+
+**A separate Claude Code profile.** Claude Code keeps settings, skills, session
+history, and its login under `CLAUDE_CONFIG_DIR`. Setup follows the same
+variable: it writes the registration to `$CLAUDE_CONFIG_DIR/.claude.json` and
+the skill to `$CLAUDE_CONFIG_DIR/skills`.
+
+```bash
+CLAUDE_CONFIG_DIR=~/.claude-rea npx rea-agents setup --client claude_code
+CLAUDE_CONFIG_DIR=~/.claude-rea claude
+```
+
+The profile needs its own login. Sessions started without the variable use
+the default profile rather than this profile's registration, skill, and history.
+
+Inline assignments apply only to that command. Keep the same prefix for every
+profile check, setup rerun, update, or removal; bare commands use the current
+environment and can otherwise inspect or recreate default-profile state:
+
+```bash
+CLAUDE_CONFIG_DIR=~/.claude-rea claude mcp list
+CLAUDE_CONFIG_DIR=~/.claude-rea npx rea-agents doctor --client claude_code --json
+CLAUDE_CONFIG_DIR=~/.claude-rea npx -y rea-agents@latest setup --client claude_code --dry-run
+```
+
+After reviewing an update plan, rerun that same prefixed setup command without
+`--dry-run` and approve its exact changes. Profile removal likewise needs the
+prefix on `claude mcp remove --scope user rea` and any `rea uninstall` command;
+keep the broader client scope of uninstall in mind. Restart the selected
+profile after changing its pinned registration.
+
+**One project.** Install without configuring Claude Code: use the curl
+installer's `--no-setup`, or run setup only for other clients. Then register
+REA from the project directory at Claude Code's local scope:
+
+<!-- x-release-please-start-version -->
+
+```bash
+claude mcp add --scope local rea -- npx -y rea-agents@6.4.0 mcp
+```
+
+<!-- x-release-please-end -->
+
+Local scope stores the entry under that directory's path in `~/.claude.json`,
+so other projects don't load it. This route doesn't install the bundled skill.
+Avoid `--scope project`, which writes `.mcp.json` into the repository where it
+can be committed or copied. `rea doctor` and `rea uninstall` read only the
+user-level entry, so they don't report or remove a local-scope registration;
+remove it with `claude mcp remove --scope local rea` from the same directory.
+`rea update` doesn't refresh it either, so it stays on the version it names.
+To move it to a newer release, run `claude mcp remove --scope local rea` from
+the same directory, then the `claude mcp add` command above with the new
+version. Running setup for Claude Code instead would add a user-level entry
+for every project.
+
+Check the separate profile with the prefixed `claude mcp list` above and compare
+with the default profile with `CLAUDE_CONFIG_DIR` unset. For local scope, run
+`claude mcp list` from the selected project and again from another project.
+
 ## Check readiness for your task
 
 Run `rea doctor` when you need diagnosis. It reads host prerequisites and agent
