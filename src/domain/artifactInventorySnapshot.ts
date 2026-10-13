@@ -9,7 +9,9 @@ import type {
 export interface ArtifactInventorySnapshot {
   readonly coverage_status: ArtifactInventoryCoverage;
   readonly manifest: ArtifactInventoryResult["manifest"];
+  /** Canonical code-point order by artifact_id, shared by scan and Evidence reconstruction. */
   readonly nodes: readonly ArtifactNode[];
+  /** Canonical code-point order by logical_path. */
   readonly occurrences: ArtifactInventoryResult["occurrences"];
   readonly edges: ArtifactInventoryResult["edges"];
   readonly provenance: ReadonlyArray<

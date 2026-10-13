@@ -5,7 +5,10 @@ import {
   normalizeJoinedLogicalPath,
   logicalPathEscapesRoot,
 } from "../../domain/artifactIdentity.js";
-import type { JavaScriptArtifactFile } from "../../domain/javascript/javascriptArtifactFiles.js";
+import type {
+  JavaScriptArtifactFile,
+  JavaScriptUnanalyzedArtifactLookup,
+} from "../../domain/javascript/javascriptArtifactFiles.js";
 import {
   admitsCanonicalPathSyntax,
   hasScheme,
@@ -75,6 +78,8 @@ export interface ResolveArtifactPathInput {
   readonly sourcePath: string;
   readonly context: ArtifactPathResolutionContext;
   readonly files: ReadonlyMap<string, JavaScriptArtifactFile>;
+  /** Inventoried files outside the JavaScript projection: present, never read. */
+  readonly unanalyzedFiles?: JavaScriptUnanalyzedArtifactLookup | undefined;
   readonly htmlBaseHref?: string | null;
   /** Import/require semantics; runtime resource paths omit this provenance. */
   readonly moduleKind?: JavaScriptModuleResolutionMode;
@@ -265,19 +270,13 @@ const resolveRuntimeSourceCandidates = (
   exactPath: string,
   sourceCandidates: readonly TypeScriptEmittedSourceCandidate[],
 ): CandidateResolution | null => {
-  const source = input.files.get(input.sourcePath);
   const exactCandidate: TypeScriptEmittedSourceCandidate = {
     path: exactPath,
     kind: "implementation",
   };
   for (const candidate of [exactCandidate, ...sourceCandidates]) {
-    const target = input.files.get(candidate.path);
-    if (
-      target === undefined ||
-      (source !== undefined &&
-        target.container_sha256 !== source.container_sha256)
-    )
-      continue;
+    const selected = findFileCandidate(input, candidate.path);
+    if (selected === null) continue;
     return candidate.kind === "declaration"
       ? {
           resolvedPath: null,
@@ -287,7 +286,7 @@ const resolveRuntimeSourceCandidates = (
             "Only a TypeScript declaration fallback was found; it does not establish the requested runtime module.",
           ],
         }
-      : { resolvedPath: candidate.path, status: "resolved", limitations: [] };
+      : selected;
   }
   return null;
 };
@@ -470,7 +469,7 @@ const bareModuleCandidate = (
             metadata.exports === undefined)));
     const packageResolution =
       metadata.kind !== "absent" ||
-      hasContainerDirectory(input.files, candidate, source?.container_sha256)
+      hasContainerDirectory(input, candidate, source?.container_sha256)
         ? resolvePackageDependency(input, candidate, request, metadata)
         : request.packageSubpath === "." && input.moduleKind !== "import"
           ? resolveFileCandidates(
@@ -663,7 +662,7 @@ const resolveLegacyEsmSubpath = (
   const file = resolveFileCandidates(input, [candidate]);
   if (file !== null) return file;
   const source = input.files.get(input.sourcePath);
-  if (hasContainerDirectory(input.files, candidate, source?.container_sha256))
+  if (hasContainerDirectory(input, candidate, source?.container_sha256))
     return unresolvedCandidate("rejected", [
       `ESM package subpath ${candidate} names a directory; directory imports are unsupported and package main or index lookup was not attempted.`,
     ]);
@@ -730,9 +729,9 @@ const resolveExportTarget = (
   if (typeof decoded !== "string") return withTargetSource(decoded);
   const candidate = confineCandidate(decoded);
   if (typeof candidate !== "string") return withTargetSource(candidate);
-  return (
+  return withTargetSource(
     resolveFileCandidates(input, [candidate]) ??
-    withTargetSource(exactPackageTargetNotFound(candidate, mapKind))
+      exactPackageTargetNotFound(candidate, mapKind),
   );
 };
 
@@ -769,10 +768,11 @@ const parseBarePackageRequest = (
 };
 
 const hasContainerDirectory = (
-  files: ReadonlyMap<string, JavaScriptArtifactFile>,
+  input: ResolveArtifactPathInput,
   candidate: string,
   containerSha256: string | undefined,
 ): boolean => {
+  const files = input.files;
   if (
     [...indexCandidates(candidate), posix.join(candidate, "package.json")].some(
       (path) => {
@@ -796,7 +796,9 @@ const hasContainerDirectory = (
         file.container_sha256 === containerSha256)
     )
       return true;
-  return false;
+  return (
+    input.unanalyzedFiles?.hasDirectory(candidate, containerSha256) ?? false
+  );
 };
 
 const htmlCandidate = (
@@ -1013,6 +1015,9 @@ const resolveDirectory = (
     sourcePath: metadata.path,
     context: "package-entrypoint",
     files: input.files,
+    ...(input.unanalyzedFiles === undefined
+      ? {}
+      : { unanalyzedFiles: input.unanalyzedFiles }),
     ...(input.moduleKind === undefined ? {} : { moduleKind: input.moduleKind }),
   };
   const candidate = contextualCandidate(entryInput);
@@ -1036,29 +1041,56 @@ const resolveDirectory = (
   );
 };
 
+/** Apply runtime-declaration policy after the shared inventory identity lookup. */
 const resolveFileCandidates = (
   input: ResolveArtifactPathInput,
   candidates: readonly string[],
 ): CandidateResolution | null => {
-  const source = input.files.get(input.sourcePath);
   for (const path of candidates) {
-    const target = input.files.get(path);
-    if (
-      target !== undefined &&
-      (source === undefined ||
-        target.container_sha256 === source.container_sha256)
-    )
-      return isRuntimeDeclarationPath(input, path)
-        ? {
-            resolvedPath: null,
-            status: "unavailable",
-            candidatePath: path,
-            limitations: [
-              `The TypeScript declaration ${path} is compile-time evidence and cannot identify a runtime module implementation.`,
-            ],
-          }
-        : { resolvedPath: path, status: "resolved", limitations: [] };
+    const selected = findFileCandidate(input, path);
+    if (selected === null) continue;
+    return selected.status === "resolved" &&
+      isRuntimeDeclarationPath(input, path)
+      ? {
+          resolvedPath: null,
+          status: "unavailable",
+          candidatePath: path,
+          limitations: [
+            `The TypeScript declaration ${path} is compile-time evidence and cannot identify a runtime module implementation.`,
+          ],
+        }
+      : selected;
   }
+  return null;
+};
+
+/** Own candidate presence and container identity independently of loader policy. */
+const findFileCandidate = (
+  input: ResolveArtifactPathInput,
+  path: string,
+): CandidateResolution | null => {
+  const source = input.files.get(input.sourcePath);
+  const target = input.files.get(path);
+  if (
+    target !== undefined &&
+    (source === undefined ||
+      target.container_sha256 === source.container_sha256)
+  )
+    return { resolvedPath: path, status: "resolved", limitations: [] };
+  const unanalyzed = input.unanalyzedFiles?.get(path);
+  if (
+    unanalyzed !== undefined &&
+    (source === undefined ||
+      unanalyzed.container_sha256 === source.container_sha256)
+  )
+    return {
+      resolvedPath: null,
+      status: "unavailable",
+      candidatePath: path,
+      limitations: [
+        `${path} exists in the inventoried artifact container (sha256 ${unanalyzed.sha256}, ${String(unanalyzed.bytes)} bytes) but is not a JavaScript, JSON, HTML, source map, or native add-on file; its contents were not analyzed.`,
+      ],
+    };
   return null;
 };
 

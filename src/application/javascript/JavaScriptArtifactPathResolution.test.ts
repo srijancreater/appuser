@@ -4,7 +4,10 @@ import {
   resolveArtifactPathByContext,
   type ResolveArtifactPathInput,
 } from "./JavaScriptArtifactPathResolution.js";
-import type { JavaScriptArtifactFile } from "../../domain/javascript/javascriptArtifactFiles.js";
+import type {
+  JavaScriptArtifactFile,
+  JavaScriptUnanalyzedArtifactFile,
+} from "../../domain/javascript/javascriptArtifactFiles.js";
 import { artifactLocalIdentity } from "./JavaScriptArtifactGraphContext.js";
 import { applicationNodeIdentitySchema } from "../../domain/javascript/javascriptApplicationEvidenceSchemas.js";
 import { analyzeJavaScriptStaticSource } from "../../domain/javascript/javascriptStaticAnalysis.js";
@@ -2245,6 +2248,104 @@ describe("url-reference JavaScript artifact path resolution", () => {
     });
   });
 });
+
+describe("present files outside the JavaScript projection", () => {
+  const unanalyzed = (
+    path: string,
+    container: string,
+  ): JavaScriptUnanalyzedArtifactFile => ({
+    path,
+    container_sha256: container.padEnd(64, "0").slice(0, 64),
+    sha256: "b".repeat(64),
+    bytes: 7,
+    inventory_artifact_id: `artifact-${path}`,
+  });
+
+  it.each(["require", "import"] as const)(
+    "reports an exact %s target that exists but is not read as unavailable",
+    (moduleKind) => {
+      const resolution = resolve({
+        declaredPath: "./core.jsc",
+        sourcePath: "main.js",
+        context: "module-specifier",
+        moduleKind,
+        files: fileMap([file("main.js", "root")]),
+        unanalyzedFiles: unanalyzedLookup([
+          ["core.jsc", unanalyzed("core.jsc", "root")],
+        ]),
+      });
+      expect(resolution).toMatchObject({
+        resolution_status: "unavailable",
+        resolved_path: null,
+        candidate_path: "core.jsc",
+      });
+      expect(resolution.limitations).toEqual([
+        `core.jsc exists in the inventoried artifact container (sha256 ${"b".repeat(64)}, 7 bytes) but is not a JavaScript, JSON, HTML, source map, or native add-on file; its contents were not analyzed.`,
+      ]);
+    },
+  );
+
+  it("keeps a target in another container not-found", () => {
+    expect(
+      resolve({
+        declaredPath: "./core.jsc",
+        sourcePath: "main.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files: fileMap([file("main.js", "root")]),
+        unanalyzedFiles: unanalyzedLookup([
+          ["core.jsc", unanalyzed("core.jsc", "nested")],
+        ]),
+      }),
+    ).toMatchObject({ resolution_status: "not-found", resolved_path: null });
+  });
+
+  it("does not admit an opaque-only dependency from another container", () => {
+    expect(
+      resolve({
+        declaredPath: "pkg/core.jsc",
+        sourcePath: "main.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files: fileMap([file("main.js", "root")]),
+        unanalyzedFiles: unanalyzedLookup([
+          [
+            "node_modules/pkg/core.jsc",
+            unanalyzed("node_modules/pkg/core.jsc", "nested"),
+          ],
+        ]),
+      }),
+    ).toMatchObject({ resolution_status: "external", resolved_path: null });
+  });
+
+  it("keeps a missing target not-found", () => {
+    expect(
+      resolve({
+        declaredPath: "./core.jsc",
+        sourcePath: "main.js",
+        context: "module-specifier",
+        moduleKind: "require",
+        files: fileMap([file("main.js", "root")]),
+        unanalyzedFiles: unanalyzedLookup([]),
+      }),
+    ).toMatchObject({ resolution_status: "not-found", resolved_path: null });
+  });
+});
+
+const unanalyzedLookup = (
+  entries: readonly (readonly [string, JavaScriptUnanalyzedArtifactFile])[],
+) => {
+  const files = new Map(entries);
+  return {
+    get: (path: string) => files.get(path),
+    hasDirectory: (path: string, container: string | undefined) =>
+      [...files.values()].some(
+        (file) =>
+          file.path.startsWith(`${path}/`) &&
+          (container === undefined || file.container_sha256 === container),
+      ),
+  };
+};
 
 const resolve = (input: ResolveArtifactPathInput) =>
   resolveArtifactPathByContext(input);

@@ -29,6 +29,25 @@ export interface JavaScriptArtifactFile {
       };
 }
 
+/**
+ * One inventoried regular file outside the JavaScript-relevant kinds. Its bytes
+ * were inventoried but not read by the source projection, so references to it are present-but-unanalyzed
+ * rather than absent.
+ */
+export interface JavaScriptUnanalyzedArtifactFile {
+  readonly path: string;
+  readonly container_sha256: string;
+  readonly sha256: string;
+  readonly bytes: number;
+  readonly inventory_artifact_id: string;
+}
+
+/** Borrowed inventory lookup; metadata is materialized only for requested paths. */
+export interface JavaScriptUnanalyzedArtifactLookup {
+  get(path: string): JavaScriptUnanalyzedArtifactFile | undefined;
+  hasDirectory(path: string, containerSha256: string | undefined): boolean;
+}
+
 /** One filesystem-backed ASAR nested beneath a directory input. */
 export interface JavaScriptArtifactContainer {
   readonly path: string;
@@ -40,6 +59,8 @@ export interface JavaScriptArtifactContainer {
 /** Deterministic relevant-file projection plus explicit omissions. */
 export interface JavaScriptArtifactFileSet {
   readonly files: readonly JavaScriptArtifactFile[];
+  /** Borrowed inventory lookup for regular files the source projection does not read. */
+  readonly unanalyzed_files?: JavaScriptUnanalyzedArtifactLookup;
   readonly containers: readonly JavaScriptArtifactContainer[];
   readonly text_bytes_read: number;
   readonly invalid_utf8_files: number;
