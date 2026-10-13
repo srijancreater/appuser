@@ -60,7 +60,8 @@ The node vocabulary covers:
 - Electron main, preload, renderer, and utility process code;
 - JavaScript asset, chunk, and module;
 - source map and original source module;
-- BrowserWindow, frame, and target;
+- BrowserWindow, `BrowserView`/`WebContentsView` (`web-contents-view`), frame,
+  and target;
 - contextBridge API, IPC channel, and IPC handler;
 - worker and service worker;
 - endpoint and storage;

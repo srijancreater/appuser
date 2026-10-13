@@ -124,8 +124,15 @@ new NativeWindow();
   let electronStep = electronSteps.next();
   expect(electronStep.done).toBe(false);
   while (electronStep.done !== true) electronStep = electronSteps.next();
-  expect([...electronStep.value]).toEqual([
-    [text.lastIndexOf("NativeWindow()"), ["BrowserWindow"]],
+  expect([...electronStep.value.callees]).toEqual([
+    [
+      text.lastIndexOf("NativeWindow()"),
+      {
+        path: ["BrowserWindow"],
+        consumed_members: 0,
+        identity: { basis: "module-binding" },
+      },
+    ],
   ]);
   expect(electronStep.value).toEqual(
     classifyParsedJavaScriptElectronBindings(parsed),
@@ -184,7 +191,11 @@ conditionalAlias.handle("conditional-alias:ping", () => "local");
   const parsed = parseJavaScriptSource(text, "aliases.js");
   if (parsed === null) throw new Error("Expected parsed source");
 
-  expect([...classifyParsedJavaScriptElectronBindings(parsed)]).toEqual([
+  expect(
+    [...classifyParsedJavaScriptElectronBindings(parsed).callees].map(
+      ([offset, { path }]) => [offset, path],
+    ),
+  ).toEqual([
     [text.indexOf("Win({"), ["BrowserWindow"]],
     [text.indexOf("bridge.exposeInMainWorld"), ["contextBridge"]],
     [text.indexOf('ipc.handle("main:ping"'), ["ipcMain"]],

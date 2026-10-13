@@ -235,9 +235,11 @@ describe("web bundle API classification parity", () => {
       ),
     ).toEqual(["/storage-named-xhr"]);
     const analysis = analyzeJavaScriptStaticSource(source);
-    expect(analysis.endpoints.map(({ value }) => value)).toEqual([
-      "/storage-named-xhr",
-    ]);
+    expect(
+      analysis.endpoints.flatMap(({ kind, value }) =>
+        kind === "data" ? [] : [value],
+      ),
+    ).toEqual(["/storage-named-xhr"]);
     expect(analysis.storage.map(({ kind }) => kind)).toEqual([
       "indexed-db",
       "indexed-db",
@@ -279,9 +281,11 @@ describe("web bundle API classification parity", () => {
       "/api",
     ]);
     const staticAnalysis = analyzeJavaScriptStaticSource(source);
-    expect(staticAnalysis.endpoints.map(({ value }) => value)).toEqual([
-      "/api",
-    ]);
+    expect(
+      staticAnalysis.endpoints.flatMap(({ kind, value }) =>
+        kind === "data" ? [] : [value],
+      ),
+    ).toEqual(["/api"]);
     expect(staticAnalysis.storage.map(({ kind }) => kind)).toEqual([
       "indexed-db",
     ]);

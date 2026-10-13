@@ -37,8 +37,8 @@ export const exceedsSemanticPrimitiveStringByteBudget = (
 
 /** Bound all outputs of a primitive addition before concatenating any. */
 export const exceedsSemanticPrimitiveAdditionByteBudget = (
-  left: readonly (string | number | boolean | null)[],
-  right: readonly (string | number | boolean | null)[],
+  left: readonly (string | number | boolean | null | undefined)[],
+  right: readonly (string | number | boolean | null | undefined)[],
 ): boolean => {
   let total = 0;
   for (const leftValue of left) {
@@ -71,7 +71,11 @@ export const exceedsSemanticTemplateByteBudget = (
 /** Make an explicit unknown value tagged with the semantic resource bound. */
 export const semanticResourceLimitUnknown = (
   resourceLimit: JavaScriptSemanticResourceLimit,
-): JavaScriptSemanticValue => ({
+): {
+  readonly status: "unknown";
+  readonly reason: string;
+  readonly resourceLimit: JavaScriptSemanticResourceLimit;
+} => ({
   status: "unknown",
   reason: RESOURCE_LIMIT_REASON[resourceLimit],
   resourceLimit,

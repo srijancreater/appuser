@@ -47,19 +47,41 @@ export const javaScriptAnalysisTransferDescriptorSchema = z.strictObject({
 });
 type Descriptor = z.output<typeof javaScriptAnalysisTransferDescriptorSchema>;
 
-/** Conservative retained-object and sealing expansion for validated transfer rows. */
+/**
+ * Retained-object expansion for validated transfer rows.
+ *
+ * Measured on Node 26 by parsing the semantic and application graph arrays of
+ * a complete Grok Bot app.asar analysis: retained heap was 1.23x to 1.42x of
+ * their JSON bytes. The parent result budget is already half of the free heap,
+ * which leaves the other half for sealing and serialization copies.
+ */
+const TRANSFER_RETENTION_EXPANSION = 2;
 export const javaScriptTransferRetentionBytes = (
   bytes: number,
   records: number,
-): number => bytes * 8 + records * 64;
+): number => bytes * TRANSFER_RETENTION_EXPANSION + records * 64;
 
-/** Larger streamed files require corresponding parent admission capacity. */
+/**
+ * Serialized semantic-fact bytes whose transfer rows fit a retention budget.
+ *
+ * Each row adds at most 32 bytes of framing and 64 bytes of retained overhead
+ * to a fact of at least 100 serialized bytes, so retention stays below four
+ * times the fact bytes.
+ */
+export const javaScriptGraphBytesWithinRetention = (
+  retentionBytes: number,
+): number => Math.max(0, Math.floor(retentionBytes / 4));
+
+/** Larger streamed files require corresponding parent retention capacity. */
 export const javaScriptTransferByteBudget = (
   resultBudgetBytes: number,
 ): number =>
   Math.min(
     MAX_TRANSFER_BYTES,
-    Math.max(TRANSFER_BYTES, Math.floor(resultBudgetBytes / 8)),
+    Math.max(
+      TRANSFER_BYTES,
+      Math.floor(resultBudgetBytes / TRANSFER_RETENTION_EXPANSION),
+    ),
   );
 
 const assertTransferByteBudget = (transferBytes: number): void => {
@@ -183,7 +205,7 @@ export const writeJavaScriptAnalysisTransfer = async (
   try {
     await append({
       kind: "projection-header",
-      value: { roots: projection.roots, truncated: projection.truncated },
+      value: { roots: projection.roots, coverage: projection.coverage },
     });
     for (const record of moduleTransferRecords(module)) await append(record);
     for (const value of projection.evidenceContexts)

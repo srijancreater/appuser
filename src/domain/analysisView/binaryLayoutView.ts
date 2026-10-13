@@ -224,10 +224,10 @@ export const projectBinaryLayoutView = (
         "Layout views require summary, facet, item or page selections.",
       ),
     );
-  if (view.collection === "modules")
+  if (view.collection !== "sections" && view.collection !== "symbols")
     return err(
       layoutIncompatible(
-        "modules collection applies to analyze_javascript_application Evidence.",
+        `${view.collection} collection applies to analyze_javascript_application Evidence.`,
       ),
     );
   const rows =

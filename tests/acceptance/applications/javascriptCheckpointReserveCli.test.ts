@@ -12,9 +12,9 @@ import { cliTest } from "../../support/cli/cliFixture.js";
 cliTest.skipIf(process.versions.bun !== undefined).for([
   { laterSources: 1, heapMb: 640, methodsCount: 400, retainGraph: true },
   { laterSources: 10, heapMb: 640, methodsCount: 400, retainGraph: true },
-  // Even an otherwise empty parent cannot admit this graph after reserving
-  // transient decoding and the next checkpoint, independent of GC timing.
-  { laterSources: 1, heapMb: 448, methodsCount: 600, retainGraph: false },
+  // The parent cannot retain this whole graph after reserving transient
+  // decoding and the next checkpoint, so it offers a byte budget instead.
+  { laterSources: 1, heapMb: 448, methodsCount: 1200, retainGraph: false },
 ])(
   "preserves evidence with $laterSources later checkpoints and a $heapMb MiB parent heap",
   { timeout: 90_000 },
@@ -61,19 +61,41 @@ cliTest.skipIf(process.versions.bun !== undefined).for([
       ({ kind, identity }) =>
         kind === "function" && identity.module_path === "a-large.mjs",
     );
-    if (retainGraph)
+    const largeCoverage = result.semantic_graph.coverage.files.find(
+      ({ module_path }) => module_path === "a-large.mjs",
+    );
+    if (retainGraph) {
       expect(methods.map(({ label }) => label).sort()).toEqual(
         Array.from(
           { length: methodsCount },
           (_, index) => `method_${String(index)}`,
         ).sort(),
       );
-    else {
-      expect(methods).toHaveLength(0);
-      expect([
-        result.graph.coverage.status,
-        result.semantic_graph.coverage.status,
-      ]).toContain("partial");
+      expect(largeCoverage?.status).toBe("complete");
+    } else {
+      // Functions are projected first, so a truncated source keeps them.
+      expect(methods.length).toBeGreaterThan(0);
+      expect(largeCoverage).toMatchObject({ status: "truncated" });
+      if (
+        largeCoverage?.graph_byte_budget == null ||
+        largeCoverage.retained_graph_bytes === null ||
+        largeCoverage.omitted_nodes === null
+      )
+        throw new Error("A truncated source reports its exact budget use");
+      expect(largeCoverage.retained_graph_bytes).toBeLessThanOrEqual(
+        largeCoverage.graph_byte_budget,
+      );
+      expect(largeCoverage.omitted_nodes).toBeGreaterThan(0);
+      expect(result.semantic_graph.coverage).toMatchObject({
+        status: "partial",
+        truncated: true,
+        omitted_nodes: largeCoverage.omitted_nodes,
+      });
+      expect(result.semantic_graph.coverage.limits).toContainEqual(
+        expect.objectContaining({
+          name: "javascript_analysis_evidence_budget_bytes",
+        }),
+      );
     }
     expect(
       result.semantic_graph.nodes.some(
@@ -100,32 +122,8 @@ cliTest.skipIf(process.versions.bun !== undefined).for([
           }),
         ]),
       );
-      if (retainGraph) expect(failures).toEqual([]);
+      expect(failures).toEqual([]);
       expect(await readFile(join(root, name), "utf8")).toBe(text);
-      if (!retainGraph && name === "a-large.mjs") {
-        const failure = z
-          .object({
-            code: z.literal("resource_constraint"),
-            remediation: z.object({ action: z.string() }),
-            details: z.object({
-              reported_limits: z.object({
-                parent_available_result_budget_bytes: z.number(),
-                module_retention_estimate_bytes: z.number(),
-                graph_retention_estimate_bytes: z.number(),
-              }),
-            }),
-          })
-          .parse(failures[0]);
-        const limits = failure.details.reported_limits;
-        expect(
-          limits.module_retention_estimate_bytes +
-            limits.graph_retention_estimate_bytes,
-        ).toBeGreaterThan(limits.parent_available_result_budget_bytes);
-        expect(failure.remediation.action).toContain("parent result budget");
-        expect(failure.remediation.action).toContain(
-          "retained static and module facts",
-        );
-      }
     }
     expect(response.stderr).not.toMatch(/FATAL ERROR:.*heap/iu);
   },

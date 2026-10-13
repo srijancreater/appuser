@@ -192,7 +192,7 @@ cliTest(
       graph.nodes.filter((node) => node.identity.module_path === "second.js"),
     ).toHaveLength(20);
     expect(graph.coverage.truncated).toBe(true);
-    expect(graph.coverage.omitted_nodes).toBeNull();
+    expect(graph.coverage.omitted_nodes).toBeGreaterThan(0);
     expect(graph.coverage.limits).toEqual(
       expect.arrayContaining([
         { name: "semantic_graph_node_ceiling", value: 50 },

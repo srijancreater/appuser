@@ -41,6 +41,12 @@ export const failedJavaScriptStaticAnalysis = (): JavaScriptStaticAnalysis => ({
     sender_validations: [],
     utility_processes: [],
     native_addon_bindings: [],
+    webview_attachments: [],
+    content_security_policies: [],
+  },
+  constant_folding: {
+    status: "unavailable",
+    reason: "JavaScript source could not be parsed.",
   },
   limitations: [
     "JavaScript source could not be parsed; absence of findings is not evidence of absence.",
@@ -467,23 +473,18 @@ const BROWSING_CONTEXT_KEYWORDS = new Set([
  * conventionally uppercase tokens.
  */
 const xhrOpenUrl = (
-  name: string,
-  methodNode: t.Node | null | undefined,
-  urlNode: t.Node | null | undefined,
-  receiverFact?:
-    | "window"
-    | "indexed-db"
-    | "cache-storage"
-    | "local"
-    | "local-indexed-db"
-    | "local-cache-storage",
-): string | undefined => {
-  const url = stringValue(urlNode);
-  if (url === undefined) return undefined;
+  { name, args, receiverFact }: StaticEndpointCall,
+  read: StaticStringReader,
+): t.Node | undefined => {
+  const methodNode = args[0];
+  const urlNode = args[1];
+  const url = read(urlNode);
+  if (url === undefined || urlNode === null || urlNode === undefined)
+    return undefined;
   // A lexical fact is stronger than the receiver's spelling. In particular,
   // browser Window and Document globals overload `open` with URL/content APIs.
   if (receiverFact === "window") return undefined;
-  const method = stringValue(methodNode);
+  const method = read(methodNode);
   // IndexedDB and Cache Storage `open` take a name and a version, so a
   // receiver spelled as storage needs a standard HTTP method literal.
   const storage =
@@ -498,13 +499,13 @@ const xhrOpenUrl = (
       FS_OPEN_FLAGS.has(url) ||
       BROWSING_CONTEXT_KEYWORDS.has(url.toLowerCase())
       ? undefined
-      : url;
+      : urlNode;
   return XHR_METHODS.has(method.toUpperCase()) ||
     ((!storage ||
       receiverFact === "local-indexed-db" ||
       receiverFact === "local-cache-storage") &&
       /^[A-Z][A-Z-]*$/u.test(method))
-    ? url
+    ? urlNode
     : undefined;
 };
 
@@ -545,34 +546,48 @@ const isKeyedCollectionReceiver = (callee: t.Node): boolean => {
   return property === "headers" || property === "searchParams";
 };
 
-/** Select the literal URL argument for recognized network callees. */
-export const endpointArgument = (
-  name: string,
-  args: readonly (
+/** Read the exact string value of one static argument. */
+export type StaticStringReader = (
+  node: t.Node | null | undefined,
+) => string | undefined;
+
+/** One call or construction considered as a network request site. */
+export interface StaticEndpointCall {
+  readonly name: string;
+  readonly args: readonly (
     | t.Expression
     | t.SpreadElement
     | t.JSXNamespacedName
     | t.ArgumentPlaceholder
-  )[],
-  callee: t.Node,
-  receiverFact?:
+  )[];
+  readonly callee: t.Node;
+  readonly receiverFact?:
     | "window"
     | "indexed-db"
     | "cache-storage"
     | "local"
     | "local-indexed-db"
-    | "local-cache-storage",
-): string | undefined => {
+    | "local-cache-storage"
+    | undefined;
+}
+
+/** Select the exact URL argument for recognized network callees. */
+export const endpointArgument = (
+  call: StaticEndpointCall,
+  read: StaticStringReader,
+): t.Node | undefined => {
+  const { name, args, callee, receiverFact } = call;
   if (receiverFact === "window") return undefined;
+  const first = argumentNode(args[0]);
+  const exact = read(first) === undefined ? undefined : first;
   if (name === "fetch" || name.endsWith(".fetch") || name === "WebSocket")
-    return stringValue(args[0]);
-  if (name.endsWith(".open"))
-    return xhrOpenUrl(name, args[0], args[1], receiverFact);
+    return exact;
+  if (name.endsWith(".open")) return xhrOpenUrl(call, read);
   const method = ["get", "post", "put", "patch", "delete", "request"].find(
     (candidate) => name === candidate || name.endsWith(`.${candidate}`),
   );
   if (method !== undefined) {
-    const value = stringValue(args[0]);
+    const value = read(first);
     // Only get and delete also belong to the keyed-collection APIs, whose
     // keys are header, field, and parameter names rather than URLs or paths.
     return value !== undefined &&
@@ -580,9 +595,9 @@ export const endpointArgument = (
       !isRequestUrlLiteral(value) &&
       isKeyedCollectionReceiver(callee)
       ? undefined
-      : value;
+      : exact;
   }
-  if (name.endsWith("loadURL")) return stringValue(args[0]);
+  if (name.endsWith("loadURL")) return exact;
   return undefined;
 };
 

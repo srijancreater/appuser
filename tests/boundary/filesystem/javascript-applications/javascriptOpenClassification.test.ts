@@ -45,7 +45,9 @@ it("classifies overloaded open calls from lexical receiver facts", async () => {
   const endpoints = graph.nodes
     .filter(({ kind }) => kind === "endpoint")
     .flatMap(({ observations }) =>
-      observations.map(({ properties }) => properties.value),
+      observations.flatMap(({ properties }) =>
+        properties.endpoint_kind === "network" ? [properties.value] : [],
+      ),
     )
     .sort();
   const storage = graph.nodes

@@ -1,3 +1,4 @@
+import { electronStaticFindingCount } from "./electronStaticAnalysisTypes.js";
 import type { JavaScriptStaticAnalysis } from "./javascriptStaticAnalysisTypes.js";
 
 /** Forecast static-fact expansion into observations, nodes and relationships. */
@@ -15,12 +16,7 @@ export const estimateJavaScriptStaticApplicationProjection = (
     facts.storage.length +
     facts.role_paths.length +
     facts.source_map_urls.length +
-    facts.electron.browser_windows.length +
-    facts.electron.context_bridge_apis.length +
-    facts.electron.ipc.length +
-    facts.electron.sender_validations.length +
-    facts.electron.utility_processes.length +
-    facts.electron.native_addon_bindings.length;
+    electronStaticFindingCount(facts.electron);
   let records = findings * 8;
   let repeatedBytes = 0;
   for (const registration of facts.bundler_registrations) {
@@ -46,5 +42,7 @@ export const estimateJavaScriptStaticApplicationProjection = (
       2;
   }
   const metadataBytes = 2048 + Buffer.byteLength(sourcePath) * 4;
-  return (checkpointBytes * 4 + repeatedBytes + records * metadataBytes) * 8;
+  // Measured on a complete Grok Bot app.asar analysis: the sum of these
+  // forecasts was 89 MB for 73 MB of retained application-graph objects.
+  return checkpointBytes * 4 + repeatedBytes + records * metadataBytes;
 };

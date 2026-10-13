@@ -1,3 +1,4 @@
+import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
 import type { ApplicationNode } from "../../domain/javascript/javascriptApplicationGraphSchemas.js";
 import type { ElectronCallPath } from "../../domain/javascript/electronStaticAnalysisTypes.js";
 import type { JavaScriptArtifactFile } from "../../domain/javascript/javascriptArtifactFiles.js";
@@ -37,11 +38,12 @@ export const addElectronCallPaths = (
     const coverage = javascriptAnalysisCoverage(javascript);
     for (const path of javascript.electron.call_paths ?? []) {
       const pathId = sha256Text(JSON.stringify(path));
-      const nodes = path.steps.map((step, index) =>
-        context.accumulator.addNode({
+      const nodes = path.steps.map((step, index) => {
+        const sourceFile = sourceFileForStep(context, file, step);
+        return context.accumulator.addNode({
           kind: "javascript-expression",
           identity: artifactLocalIdentity(
-            file.sha256,
+            sourceFile.sha256,
             "electron-call-path-step",
             `${pathId}:${String(index)}`,
           ),
@@ -62,8 +64,8 @@ export const addElectronCallPaths = (
                 resolution: "candidate",
               },
               evidence: staticInferenceEvidence({
-                sha256: file.sha256,
-                path: file.path,
+                sha256: sourceFile.sha256,
+                path: sourceFile.path,
                 range: step.location,
                 operation: "substitute-electron-wrapper",
                 coverage,
@@ -73,14 +75,14 @@ export const addElectronCallPaths = (
               }),
             },
           ],
-        }),
-      );
+        });
+      });
       const first = nodes[0],
         entry = path.steps[0];
       const owner = entry
         ? electronFindingSourceNode(
             context,
-            file,
+            sourceFileForStep(context, file, entry),
             entry.module_key,
             entry.module_runtime ?? undefined,
           )
@@ -89,7 +91,7 @@ export const addElectronCallPaths = (
         addElectronInferenceEdge(context, {
           source: owner,
           target: first,
-          file,
+          file: sourceFileForStep(context, file, entry),
           range: entry.location,
           coverage,
           relation: "contains",
@@ -109,7 +111,7 @@ export const addElectronCallPaths = (
         addElectronInferenceEdge(context, {
           source,
           target,
-          file,
+          file: sourceFileForStep(context, file, step),
           range: step.location,
           coverage,
           relation: ["exposure", "factory", "ipc"].includes(previous.kind)
@@ -155,7 +157,8 @@ export const addElectronCallPaths = (
             channel: transmission.finding.channel,
             pairing_basis: "unique-exact-literal-channel",
             resolution: "candidate",
-            handler_path: to.file.path,
+            handler_path:
+              handler.finding.linked_operation?.source_path ?? to.file.path,
             conditions: to.path.conditions,
           },
           limitations: [
@@ -173,6 +176,9 @@ const matches = (
   const { path } = projected;
   const { finding } = record;
   const invocation = finding.invocation_location;
+  const operation = finding.linked_operation;
+  const operationPath = operation?.source_path ?? record.file.path;
+  const operationLocation = operation?.location ?? finding.location;
   const sourceStepKind =
     finding.mode === "send" || finding.mode === "invoke" ? "terminal" : "ipc";
   return (
@@ -181,13 +187,30 @@ const matches = (
     path.steps.some(
       (step) =>
         step.kind === sourceStepKind &&
-        electronRangeKey(step.location) === electronRangeKey(finding.location),
+        (step.source_path ?? projected.file.path) === operationPath &&
+        electronRangeKey(step.location) === electronRangeKey(operationLocation),
     ) &&
     (invocation === undefined ||
       path.steps.some(
         (step) =>
           (step.kind === "call" || step.kind === "exposure") &&
+          (step.source_path ?? projected.file.path) === record.file.path &&
           electronRangeKey(step.location) === electronRangeKey(invocation),
       ))
   );
 };
+
+function sourceFileForStep(
+  context: JavaScriptArtifactGraphContext,
+  file: JavaScriptArtifactFile,
+  step: ElectronCallPath["steps"][number],
+): JavaScriptArtifactFile {
+  if (step.source_path === undefined) return file;
+  const linked = context.filesByPath.get(step.source_path);
+  if (linked === undefined || linked.sha256 !== step.source_sha256)
+    throw new AnalysisOutputError(
+      "analyze_javascript_application",
+      "A linked Electron step does not match its retained source artifact.",
+    );
+  return linked;
+}

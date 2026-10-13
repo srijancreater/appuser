@@ -1,6 +1,7 @@
 import type { JavaScriptArtifactGraphContext } from "./JavaScriptArtifactGraphContext.js";
 import { addElectronIpcBoundaries } from "./ElectronBoundaryGraphIpc.js";
 import { addElectronNativeBoundaries } from "./ElectronBoundaryGraphNative.js";
+import { addElectronPolicyBoundaries } from "./ElectronBoundaryGraphPolicies.js";
 import { addElectronWindowBoundaries } from "./ElectronBoundaryGraphWindows.js";
 import { addElectronCallPaths } from "./ElectronBoundaryGraphCallPaths.js";
 
@@ -11,5 +12,6 @@ export const addElectronBoundaries = (
   addElectronWindowBoundaries(context);
   addElectronIpcBoundaries(context);
   addElectronNativeBoundaries(context);
+  addElectronPolicyBoundaries(context);
   addElectronCallPaths(context);
 };

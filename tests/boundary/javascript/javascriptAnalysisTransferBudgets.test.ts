@@ -17,9 +17,9 @@ import {
 it("allows larger streamed transfers only with corresponding parent capacity", () => {
   const mib = 1024 * 1024;
   expect(javaScriptTransferByteBudget(0)).toBe(512 * mib);
-  expect(javaScriptTransferByteBudget(4096 * mib)).toBe(512 * mib);
-  expect(javaScriptTransferByteBudget(12288 * mib)).toBe(1536 * mib);
-  expect(javaScriptTransferByteBudget(32768 * mib)).toBe(2048 * mib);
+  expect(javaScriptTransferByteBudget(1024 * mib)).toBe(512 * mib);
+  expect(javaScriptTransferByteBudget(3072 * mib)).toBe(1536 * mib);
+  expect(javaScriptTransferByteBudget(8192 * mib)).toBe(2048 * mib);
 });
 
 it("enforces the offered complete-file byte budget while preserving authenticated round trips", async () => {
@@ -38,7 +38,7 @@ it("enforces the offered complete-file byte budget while preserving authenticate
   const ir = analyzeJavaScriptSemantics(text);
   const module = projectJavaScriptModuleSemantics(ir);
   const projection = await completeJavaScriptAnalysisSteps(
-    projectJavaScriptSemanticFileSteps(file, ir, 100),
+    projectJavaScriptSemanticFileSteps(file, ir, null, null),
   );
   const observed = await writeJavaScriptAnalysisTransfer(
     join(root, "observed"),

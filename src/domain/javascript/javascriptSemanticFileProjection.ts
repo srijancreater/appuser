@@ -1,5 +1,6 @@
 import type {
   JavaScriptSemanticEvidenceContext,
+  JavaScriptSemanticFileProjectionCoverage,
   JavaScriptSemanticFingerprint,
   JavaScriptSemanticGraphNode,
   JavaScriptSemanticGraphRelation,
@@ -14,5 +15,5 @@ export interface JavaScriptSemanticFileProjection {
   readonly relations: readonly JavaScriptSemanticGraphRelation[];
   readonly unknowns: readonly JavaScriptSemanticGraphUnknown[];
   readonly fingerprints: readonly JavaScriptSemanticFingerprint[];
-  readonly truncated: boolean;
+  readonly coverage: JavaScriptSemanticFileProjectionCoverage;
 }

@@ -351,6 +351,7 @@ const emptyAnalysis = (): JavaScriptArtifactAnalysis => ({
   packages: [],
   json_modules: [],
   html_scripts: [],
+  html_policies: [],
   source_maps: [],
   visited_ast_nodes: 0,
   findings: 0,

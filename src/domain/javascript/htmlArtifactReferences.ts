@@ -10,17 +10,28 @@ interface HtmlScriptReference {
   readonly endOffset: number;
 }
 
-/** Extract inert HTML script references and the first document base href. */
+interface HtmlPolicyReference {
+  readonly header: string;
+  readonly content: string;
+  readonly startOffset: number;
+  readonly endOffset: number;
+}
+
+const POLICY_HEADER = /^content-security-policy(?:-report-only)?$/iu;
+
+/** Extract inert HTML script and policy references and the first base href. */
 export const htmlArtifactReferences = (
   text: string,
 ): {
   readonly baseHref: string | null;
   readonly scripts: readonly HtmlScriptReference[];
+  readonly policies: readonly HtmlPolicyReference[];
 } => {
   const pending: DefaultTreeAdapterTypes.Node[] = [
     parse(text, { sourceCodeLocationInfo: true }),
   ];
   const scripts: HtmlScriptReference[] = [];
+  const policies: HtmlPolicyReference[] = [];
   let baseHref: string | null = null;
   while (pending.length > 0) {
     const node = pending.pop();
@@ -32,6 +43,23 @@ export const htmlArtifactReferences = (
       if (node.tagName === "base" && baseHref === null) {
         const href = node.attrs.find(({ name }) => name === "href");
         if (href !== undefined) baseHref = href.value;
+      }
+      if (node.tagName === "meta") {
+        const header = node.attrs.find(({ name }) => name === "http-equiv");
+        const content = node.attrs.find(({ name }) => name === "content");
+        const location = node.sourceCodeLocation?.startTag;
+        if (
+          header !== undefined &&
+          POLICY_HEADER.test(header.value) &&
+          content !== undefined &&
+          location !== undefined
+        )
+          policies.push({
+            header: header.value.toLowerCase(),
+            content: content.value,
+            startOffset: location.startOffset,
+            endOffset: location.endOffset,
+          });
       }
       if (node.tagName === "script") {
         const src = node.attrs.find(({ name }) => name === "src");
@@ -51,5 +79,5 @@ export const htmlArtifactReferences = (
       for (const child of node.childNodes.toReversed()) pending.push(child);
     }
   }
-  return { baseHref, scripts };
+  return { baseHref, scripts, policies };
 };

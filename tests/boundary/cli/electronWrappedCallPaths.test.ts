@@ -225,3 +225,88 @@ cliTest(
     expect(joins.map((e) => e.properties.channel)).toEqual(["test:cut"]);
   },
 );
+
+for (const surface of ["CLI", "stdio MCP"] as const)
+  cliTest(
+    `pairs a generated RPC edge across a global symbol registry through ${surface}`,
+    async ({ cli }) => {
+      const root = await createTestTempDirectory("rea-electron-registry-edge-");
+      await writeFixtureFiles(root, {
+        "main-core.cjs": `"use strict";
+var dn=require("electron");
+function YN(e,t){return{handle:(n,r)=>{e.handle(n,(o,a)=>r(t.senderFacts(o),a))}}}
+function JN(e){return e.ipcMain!=null?YN(e.ipcMain,e):YN(dn.ipcMain,e)}
+globalThis[Symbol.for("demo.core.modules")]=Object.freeze([{get ipcMainTransport(){return JN}}]);
+`,
+        "main-app.cjs": `"use strict";
+var nlt=Object.create,mT=Object.defineProperty,olt=Object.getOwnPropertyDescriptor,ilt=Object.getOwnPropertyNames,alt=Object.getPrototypeOf,slt=Object.prototype.hasOwnProperty;
+var I=(e,t)=>()=>(t||e((t={exports:{}}).exports,t),t.exports),fT=(e,t,r,n)=>{if(t&&typeof t=="object"||typeof t=="function")for(let o of ilt(t))!slt.call(e,o)&&o!==r&&mT(e,o,{get:()=>t[o],enumerable:!(n=olt(t,o))||n.enumerable});return e},E=(e,t,r)=>(r=e!=null?nlt(alt(e)):{},fT(t||!e||!e.__esModule?mT(r,"default",{value:e,enumerable:!0}):r,e));
+var oe=I((x,m)=>{m.exports=globalThis[Symbol.for("demo.core.modules")]});
+var yd=I((x,m)=>{m.exports=oe()[0]});
+var F=E(yd()),Q=require("electron");
+function k(){return{noArgs:{schema:null},args:e=>({schema:e})}}
+function Uo(e,t){return Object.freeze({kind:"rpc-edge",edge:e,methods:t.methods})}
+function S(e,t){return\`dune-rpc:\${e}:m:\${t}\`}
+function El(){return(e,t)=>{let r={};for(let[n,o]of Object.entries(t))r[n]={trust:e,run:o};return r}}
+function serve(e,t,r){for(let{method:l}of t){let u=r.handlers[l];if(u==null)throw new Error(l);let m=r.trust[u.trust];if(m==null)throw new Error(u.trust);r.transport.handle(S(e,l),async(A,P)=>{if(m.kind==="require"&&!m.test(A))return{ok:!1};return{ok:!0,value:await u.run(P,A)}})}}
+function bl(e,t){return serve(e.edge,Object.entries(e.methods).map(([n,{schema:r}])=>({method:n,validate:r})),t)}
+var Jv=Uo("main",{methods:{readClipboard:k().noArgs,openExternal:k().args({url:1})}});
+var Vr=El();
+function trust(){return{appWindow:{kind:"require",test:e=>e.topFrame,denial:"top frame only"}}}
+function handlers(e){return Vr("appWindow",{readClipboard:()=>e.clipboard.readText(),openExternal:({url:t})=>e.shell.openExternal(t)})}
+function G(e){return bl(Jv,{transport:(0,F.ipcMainTransport)({ipcMain:e.ipcMain??Q.ipcMain,senderFacts:t=>({topFrame:t.senderFrame===t.sender.mainFrame})}),trust:trust(),handlers:handlers(Q)})}
+G({});
+`,
+        "preload.cjs": `"use strict";
+var x=require("electron");
+function W(e,n){return\`dune-rpc:\${e}:m:\${n}\`}
+function r(){return{noArgs:{schema:null},args:e=>({schema:e})}}
+function Te(e,t){return Object.freeze({kind:"rpc-edge",edge:e,methods:t.methods})}
+function Pt(e){return{invoke:(n,a)=>e.invoke(n,a)}}
+function Ke(e,n,o={}){let a={},d=o.measures??null,b=async(I,U)=>{let w=await n.invoke(W(e.edge,I),U);if(w.ok)return w.value;throw new Error("failed")},T=(I,U)=>d==null?b(I,U):b(I,U).then(v=>v);for(let[I,{schema:U}]of Object.entries(e.methods))a[I]=U===null?()=>T(I,{}):w=>T(I,w);return a}
+var Xi=Te("main",{methods:{readClipboard:r().noArgs,openExternal:r().args({url:1})}});
+x.contextBridge.exposeInMainWorld("desktop",Ke(Xi,Pt(x.ipcRenderer)));
+`,
+      });
+      const { graph, summary } = await analyzeJavaScriptDirectory(
+        surface,
+        cli,
+        root,
+      );
+      expect(summary.ipc).toMatchObject({
+        paired_renderer_transmissions: 2,
+        guarded_renderer_transmissions: 0,
+        ambiguous_renderer_transmissions: 0,
+      });
+      const handlers = graph.nodes
+        .filter((node) => node.kind === "ipc-handler")
+        .flatMap((node) => node.observations)
+        .filter((observation) =>
+          String(observation.properties.channel).startsWith("dune-rpc:main:m:"),
+        );
+      expect(
+        handlers.map(({ properties }) => properties.channel).sort(),
+      ).toEqual([
+        "dune-rpc:main:m:openExternal",
+        "dune-rpc:main:m:readClipboard",
+      ]);
+      for (const { properties } of handlers)
+        expect(properties.linked_operation).toMatchObject({
+          source_path: "main-core.cjs",
+        });
+      const guarded = graph.nodes
+        .flatMap((node) => node.observations)
+        .find(
+          (observation) =>
+            observation.properties.step_kind === "terminal" &&
+            observation.properties.entry_kind === "ipc-handler" &&
+            observation.properties.channel === "dune-rpc:main:m:readClipboard",
+        );
+      expect(guarded?.label).toBe("electron.clipboard.readText");
+      expect(guarded?.properties.conditions).toEqual([
+        expect.objectContaining({
+          expression: '!(m.kind==="require"&&!m.test(A))',
+        }),
+      ]);
+    },
+  );

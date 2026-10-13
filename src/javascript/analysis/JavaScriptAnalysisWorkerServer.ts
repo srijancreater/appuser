@@ -5,6 +5,7 @@ import { createInterface } from "node:readline";
 import { getHeapStatistics } from "node:v8";
 import { AnalysisResourceConstraintError } from "../../domain/analysisErrorCore.js";
 import { javaScriptRuntime } from "../../domain/runtimeVersion.js";
+import type { JavaScriptCompanionSource } from "../../domain/javascript/javascriptGlobalSymbolLinks.js";
 import type { JavaScriptArtifactFile } from "../../domain/javascript/javascriptArtifactFiles.js";
 import type { JavaScriptStaticAnalysis } from "../../domain/javascript/javascriptStaticAnalysisTypes.js";
 import type { JavaScriptModuleSemanticIr } from "../../domain/javascript/javascriptModuleSemanticIr.js";
@@ -22,16 +23,28 @@ import {
   type JavaScriptWorkerMessage,
 } from "./JavaScriptAnalysisWorkerProtocol.js";
 
+/** Parent capacity offered after static facts were retained. */
+export interface JavaScriptWorkerSemanticAdmission {
+  /** Heap the parent can retain for module facts and the semantic graph. */
+  readonly resultBytes: number;
+  /** Serialized semantic-fact bytes this source may add to the Evidence. */
+  readonly graphBytes: number;
+}
+
 /** Trusted composition callback; this provider owns framing and temporary I/O. */
 export interface JavaScriptSourceWorkerAnalyzer {
   (
     file: JavaScriptArtifactFile,
-    nodeBudget: number,
+    companions: readonly JavaScriptCompanionSource[],
+    nodeBudget: number | null,
     callbacks: {
       readonly phase: (
         phase: "parse" | "static" | "semantic" | "projection",
       ) => Promise<void>;
-      readonly checkpoint: (facts: JavaScriptStaticAnalysis) => Promise<number>;
+      /** Retain static facts; resolve the parent's offered semantic budgets. */
+      readonly checkpoint: (
+        facts: JavaScriptStaticAnalysis,
+      ) => Promise<JavaScriptWorkerSemanticAdmission>;
     },
   ): Promise<{
     readonly module: JavaScriptModuleSemanticIr;
@@ -106,11 +119,27 @@ const analyzeJob = async (
       throw new TypeError(
         "JavaScript worker source text digest does not match its request",
       );
+    const companions: JavaScriptCompanionSource[] = [];
+    for (const [index, companion] of (request.companions ?? []).entries()) {
+      const text = await readFile(
+        join(root, `${request.id}.companion-${String(index)}.source`),
+        "utf8",
+      );
+      if (
+        createHash("sha256").update(text).digest("hex") !==
+        companion.text_sha256
+      )
+        throw new TypeError(
+          "JavaScript worker companion text digest does not match its request",
+        );
+      companions.push({ path: companion.path, text });
+    }
     const result = await analyze(
       {
         ...request.file,
         text: { included: true, value: source },
       },
+      companions,
       request.node_budget,
       {
         phase: async (phase) => send({ kind: "phase", id: request.id, phase }),
@@ -153,7 +182,10 @@ const analyzeJob = async (
               "JavaScript worker admission names a different source job",
             );
           resultBudgetBytes = admission.semantic_result_budget_bytes;
-          return resultBudgetBytes;
+          return {
+            resultBytes: resultBudgetBytes,
+            graphBytes: admission.semantic_graph_bytes,
+          };
         },
       },
     );

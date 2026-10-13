@@ -82,3 +82,21 @@ describe("Electron option evidence", () => {
     );
   });
 });
+
+it("decodes HTML character references in embedded CSP declarations", () => {
+  const analysis = analyzeJavaScriptStaticSource(
+    `const html = '<meta http-equiv="Content-Security-Policy" content="script-src &#39;unsafe-inline&#39;; object-src &#39;none&#39;">';`,
+  );
+  expect(analysis.electron.content_security_policies).toContainEqual(
+    expect.objectContaining({
+      mechanism: "html-meta-string",
+      policy: "script-src 'unsafe-inline'; object-src 'none'",
+      concerns: [
+        expect.objectContaining({
+          directive: "script-src",
+          source: "'unsafe-inline'",
+        }),
+      ],
+    }),
+  );
+});

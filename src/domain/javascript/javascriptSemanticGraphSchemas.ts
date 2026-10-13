@@ -327,12 +327,67 @@ export const javaScriptSemanticFingerprintSchema =
     fingerprint_sha256: digestSchema,
   });
 
+const countSchema = z.number().int().min(0);
+
 const familyCoverageSchema = z.strictObject({
   family: z.enum(JAVASCRIPT_SEMANTIC_RELATION_FAMILIES),
   status: z.enum(["complete", "partial", "unknown", "unsupported"]),
-  retained_relations: z.number().int().min(0),
-  omitted_relations: z.number().int().min(0).nullable(),
-  unknown_ids: z.array(semanticUnknownIdSchema),
+  retained_relations: countSchema,
+  omitted_relations: countSchema.nullable(),
+  retained_unknowns: countSchema.describe(
+    "Unknown frontiers of this family retained in `unknowns`.",
+  ),
+  omitted_unknowns: countSchema
+    .nullable()
+    .describe(
+      "Distinct frontiers of this family observed but not retained; null when an unavailable source left the count unknown.",
+    ),
+});
+
+/** Exact frontier counts for one source, family and reason. */
+export const javaScriptSemanticUnknownCountSchema = z
+  .strictObject({
+    family: z.enum(JAVASCRIPT_SEMANTIC_RELATION_FAMILIES),
+    reason: z.enum(JAVASCRIPT_SEMANTIC_UNKNOWN_REASONS),
+    total: countSchema,
+    retained: countSchema,
+  })
+  .refine(({ retained, total }) => retained <= total, {
+    message: "Retained unknown frontiers cannot exceed the observed total",
+    path: ["retained"],
+  });
+
+/** Facts one analyzed source projected and retained within its byte budget. */
+export const javaScriptSemanticFileProjectionCoverageSchema = z.strictObject({
+  status: z.enum(["complete", "truncated"]),
+  graph_byte_budget: countSchema
+    .nullable()
+    .describe(
+      "Serialized semantic-fact bytes offered to this source when it was truncated; null when complete or unbounded.",
+    ),
+  retained_graph_bytes: countSchema.describe(
+    "Serialized bytes of this source's retained nodes, relations, fingerprints, unknowns and first-referenced evidence contexts.",
+  ),
+  omitted_nodes: countSchema,
+  omitted_relations: countSchema
+    .nullable()
+    .describe(
+      "Distinct relations refused between retained nodes; null when omitted nodes also removed relations that were never constructed.",
+    ),
+  omitted_fingerprints: countSchema,
+  unknowns: z.array(javaScriptSemanticUnknownCountSchema),
+});
+
+const fileCoverageSchema = z.strictObject({
+  module_path: relativePathSchema,
+  artifact_sha256: digestSchema,
+  status: z.enum(["complete", "truncated", "unavailable"]),
+  graph_byte_budget: countSchema.nullable(),
+  retained_graph_bytes: countSchema.nullable(),
+  omitted_nodes: countSchema.nullable(),
+  omitted_relations: countSchema.nullable(),
+  omitted_fingerprints: countSchema.nullable(),
+  unknowns: z.array(javaScriptSemanticUnknownCountSchema),
 });
 
 const graphCoverageSchema = z.strictObject({
@@ -348,6 +403,11 @@ const graphCoverageSchema = z.strictObject({
     }),
   ),
   families: z.array(familyCoverageSchema).length(12),
+  files: z
+    .array(fileCoverageSchema)
+    .describe(
+      "Per-source semantic coverage ordered by module path; unavailable sources were not projected.",
+    ),
 });
 
 /** Graph content before its top-level commitment is derived. */
@@ -395,6 +455,12 @@ export type JavaScriptSemanticGraphUnknown = z.infer<
 export type JavaScriptSemanticFingerprint = z.infer<
   typeof javaScriptSemanticFingerprintSchema
 >;
+/** Budget coverage reported by the source projection that produced the facts. */
+export type JavaScriptSemanticFileProjectionCoverage = z.infer<
+  typeof javaScriptSemanticFileProjectionCoverageSchema
+>;
+/** Per-source semantic coverage retained in the graph. */
+export type JavaScriptSemanticFileCoverage = z.infer<typeof fileCoverageSchema>;
 /** Canonical graph content before graph ID derivation. */
 export type JavaScriptSemanticGraphInput = z.infer<
   typeof javaScriptSemanticGraphInputSchema

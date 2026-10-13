@@ -4,16 +4,9 @@ import * as t from "@babel/types";
 import { expect, it } from "vitest";
 
 import {
-  SEMANTIC_GRAPH_FILE_NODE_CEILING,
-  SEMANTIC_GRAPH_NODE_CEILING,
   createJavaScriptSemanticGraphProjection,
   projectJavaScriptSemanticFileSteps,
 } from "./JavaScriptSemanticGraphBuilder.js";
-import {
-  addSemanticGraphNode,
-  constructSemanticGraphNode,
-  createSemanticGraphProjectionState,
-} from "./JavaScriptSemanticGraphConstruction.js";
 import type { JavaScriptArtifactFile } from "../../domain/javascript/javascriptArtifactFiles.js";
 import { queryJavaScriptSemanticGraph } from "../../domain/javascript/javascriptSemanticQuery.js";
 import {
@@ -346,31 +339,6 @@ it("keeps duplicate function fingerprints ambiguous", () => {
   expect(query.summary.total_seed_matches).toBe(2);
 });
 
-const semanticNodeFor = (roleKey: string) => {
-  const file: JavaScriptArtifactFile = {
-    path: "budget.js",
-    container_sha256: SHA256,
-    sha256: SHA256,
-    bytes: 0,
-    inventory_artifact_id: `art_${SHA256}`,
-    kind: "javascript",
-    unpacked: false,
-    text: { included: true, value: "" },
-  };
-  const state = createSemanticGraphProjectionState();
-  return constructSemanticGraphNode(
-    file,
-    {
-      kind: "expression",
-      roleKey,
-      location: null,
-      label: roleKey,
-      functionNodeId: null,
-    },
-    state,
-  );
-};
-
 it.each([
   "const value = consume(Promise.resolve(1));",
   "async function run() { await consume(Promise.resolve(1)); }",
@@ -513,33 +481,179 @@ it.each([
   expect(query.nodes.map(({ node_id }) => node_id)).toContain(promise?.node_id);
 });
 
-it("bounds semantic node projection and reports the ceiling in coverage", () => {
-  // A bundled vendor library can emit tens of thousands of semantic nodes on its
-  // own (measured: 135,286 from one minified editor bundle). Without a ceiling the
-  // projection exhausts the heap and the result cannot be serialized. The bound
-  // must be reported through coverage rather than dropping data silently.
-  const statements = Array.from(
-    { length: 4_000 },
-    (_, index) =>
-      `const value${index} = { a: ${index}, b: [${index}, ${index + 1}] };`,
-  ).join("\n");
-  const graph = graphFor(statements);
+const budgetFile = (source: string): JavaScriptArtifactFile => ({
+  path: "budget.js",
+  container_sha256: SHA256,
+  sha256: SHA256,
+  bytes: Buffer.byteLength(source),
+  inventory_artifact_id: `art_${SHA256}`,
+  kind: "javascript",
+  unpacked: false,
+  text: { included: true, value: source },
+});
 
-  expect(graph.nodes.length).toBeLessThanOrEqual(SEMANTIC_GRAPH_NODE_CEILING);
-  expect(graph.coverage.truncated).toBe(true);
-  expect(graph.coverage.status).toBe("partial");
-  expect(graph.coverage.omitted_nodes).toBeNull();
-  expect(graph.coverage.omitted_relations).toBeNull();
+const projectWithin = (
+  source: string,
+  graphByteBudget: number | null,
+  nodeBudget: number | null = null,
+) => {
+  const steps = projectJavaScriptSemanticFileSteps(
+    budgetFile(source),
+    analyzeJavaScriptSemantics(source),
+    graphByteBudget,
+    nodeBudget,
+  );
+  for (;;) {
+    const next = steps.next();
+    if (next.done === true) return next.value;
+  }
+};
+
+const BUDGET_SOURCE = Array.from(
+  { length: 120 },
+  (_, index) =>
+    `const value${String(index)} = { a: ${String(index)}, b: input${String(index)} }; handlers[key${String(index)}](value${String(index)});`,
+).join("\n");
+
+it("measures retained facts as their serialized Evidence bytes", () => {
+  const projected = projectWithin(BUDGET_SOURCE, Number.MAX_SAFE_INTEGER);
+  const serialized = [
+    ...projected.evidenceContexts,
+    ...projected.nodes,
+    ...projected.relations,
+    ...projected.fingerprints,
+    ...projected.unknowns,
+  ].reduce((total, fact) => total + Buffer.byteLength(JSON.stringify(fact)), 0);
+  expect(projected.unknowns.length).toBeGreaterThan(0);
+  expect(projected.coverage).toMatchObject({
+    status: "complete",
+    graph_byte_budget: null,
+    retained_graph_bytes: serialized,
+    omitted_nodes: 0,
+    omitted_relations: 0,
+    omitted_fingerprints: 0,
+  });
+  // A budget the facts fill exactly omits nothing.
+  const exact = projectWithin(
+    BUDGET_SOURCE,
+    projected.coverage.retained_graph_bytes,
+  );
+  expect(exact.coverage.status).toBe("complete");
+  expect(exact.nodes).toEqual(projected.nodes);
+});
+
+it("offers unknowns and unreferenced nodes only after every relation and fingerprint", () => {
+  const full = projectWithin(BUDGET_SOURCE, Number.MAX_SAFE_INTEGER);
+  const projected = projectWithin(
+    BUDGET_SOURCE,
+    full.coverage.retained_graph_bytes - 1,
+  );
+  expect(projected.relations).toEqual(full.relations);
+  expect(projected.fingerprints).toEqual(full.fingerprints);
+  expect(projected.unknowns).toEqual(full.unknowns);
+  // Nodes no admitted fact references are offered last.
+  expect(projected.nodes).toHaveLength(full.nodes.length - 1);
+  expect(projected.coverage).toMatchObject({
+    status: "truncated",
+    omitted_nodes: 1,
+    omitted_relations: null,
+    omitted_fingerprints: 0,
+  });
+  expect(projected.coverage.unknowns).toEqual(full.coverage.unknowns);
+});
+
+it("keeps a source-ordered prefix with exact counts when a budget closes", () => {
+  const full = projectWithin(BUDGET_SOURCE, Number.MAX_SAFE_INTEGER);
+  const budget = Math.floor(full.coverage.retained_graph_bytes / 4);
+  const projected = projectWithin(BUDGET_SOURCE, budget);
+  const fullNodeIds = new Set(full.nodes.map(({ node_id }) => node_id));
+  expect(projected.coverage.status).toBe("truncated");
+  expect(projected.coverage.retained_graph_bytes).toBeLessThanOrEqual(budget);
+  expect(projected.nodes.every(({ node_id }) => fullNodeIds.has(node_id))).toBe(
+    true,
+  );
+  expect(projected.coverage.omitted_nodes).toBe(
+    full.nodes.length - projected.nodes.length,
+  );
+  // Omitted nodes also removed relations that were never constructed.
+  expect(projected.coverage.omitted_relations).toBeNull();
+  expect(projected.coverage.omitted_fingerprints).toBe(
+    full.fingerprints.length - projected.fingerprints.length,
+  );
   expect(
-    graph.coverage.families.every(
-      ({ omitted_relations }) => omitted_relations === null,
+    projected.coverage.unknowns.reduce(
+      (total, count) => total + count.total,
+      0,
     ),
-  ).toBe(true);
+  ).toBe(full.unknowns.length);
+  // Retained nodes are connected: each is a root, an endpoint, an owner, or
+  // named by a retained fingerprint or unknown frontier.
+  const referencedNodes = new Set([
+    ...projected.roots,
+    ...projected.relations.flatMap(({ source_node_id, target_node_id }) => [
+      source_node_id,
+      target_node_id,
+    ]),
+    ...projected.nodes.flatMap(({ function_node_id }) =>
+      function_node_id === null ? [] : [function_node_id],
+    ),
+    ...projected.fingerprints.map(({ function_node_id }) => function_node_id),
+    ...projected.unknowns.flatMap(({ node_id, candidate_node_ids }) => [
+      ...(node_id === null ? [] : [node_id]),
+      ...candidate_node_ids,
+    ]),
+  ]);
+  expect(projected.relations.length).toBeGreaterThan(0);
   expect(
-    graph.coverage.limits.some(
-      ({ name }) => name === "semantic_graph_node_ceiling",
-    ),
-  ).toBe(true);
+    projected.nodes.filter(({ node_id }) => !referencedNodes.has(node_id)),
+  ).toEqual([]);
+  // Provenance interned by refused facts is not transferred.
+  const referenced = new Set(
+    [
+      ...projected.nodes,
+      ...projected.relations,
+      ...projected.fingerprints,
+      ...projected.unknowns,
+    ].map(({ evidence }) => evidence.context_id),
+  );
+  expect(
+    projected.evidenceContexts.map(({ context_id }) => context_id).sort(),
+  ).toEqual([...referenced].sort());
+});
+
+it("reports per-file coverage and the offering limit in the graph", () => {
+  const source = BUDGET_SOURCE;
+  const file = budgetFile(source);
+  const full = projectWithin(source, Number.MAX_SAFE_INTEGER);
+  const projection = createJavaScriptSemanticGraphProjection();
+  projection.adoptFileProjection(
+    file,
+    projectWithin(source, Math.floor(full.coverage.retained_graph_bytes / 4)),
+  );
+  const limit = {
+    name: "javascript_analysis_evidence_budget_bytes",
+    value: 1,
+    unit: "bytes" as const,
+  };
+  const graph = projection.finish(
+    SHA256,
+    { graph_id: `jag_${"b".repeat(64)}`, nodes: [] },
+    [limit],
+  );
+  expect(graph.coverage).toMatchObject({
+    status: "partial",
+    truncated: true,
+    omitted_relations: null,
+    limits: [limit],
+    files: [{ module_path: "budget.js", status: "truncated" }],
+  });
+  expect(graph.coverage.omitted_nodes).toBe(
+    full.nodes.length - graph.nodes.length,
+  );
+  const objectFlow = graph.coverage.families.find(
+    ({ family }) => family === "object-flow" || family === "call-flow",
+  );
+  expect(objectFlow?.omitted_unknowns).toBeGreaterThan(0);
 });
 
 it("leaves a small application complete and untruncated", () => {
@@ -548,41 +662,9 @@ it("leaves a small application complete and untruncated", () => {
   expect(graph.coverage.omitted_nodes).toBe(0);
   expect(graph.coverage.omitted_relations).toBe(0);
   expect(graph.coverage.limits).toEqual([]);
-});
-
-it("does not mark a file truncated when it exactly fills its budget", () => {
-  // Each unbound reference projects one expression, plus the module root.
-  const graph = graphFor(
-    "external;\n".repeat(SEMANTIC_GRAPH_FILE_NODE_CEILING - 1),
-  );
-  expect(graph.nodes).toHaveLength(SEMANTIC_GRAPH_FILE_NODE_CEILING);
-  expect(graph.coverage).toMatchObject({
-    truncated: false,
-    omitted_nodes: 0,
-    omitted_relations: 0,
-    limits: [],
-  });
-});
-
-it("only records node loss when the budget rejects a new identity", () => {
-  // The truncation signal must record blocked node creation, not a zero
-  // remaining budget: a file using exactly its share drops nothing.
-  const state = createSemanticGraphProjectionState();
-  state.fileNodeBudget = 2;
-  state.fileNodesDropped = false;
-  const first = addSemanticGraphNode(state, semanticNodeFor("first"));
-  const second = addSemanticGraphNode(state, semanticNodeFor("second"));
-  expect(first).not.toBeNull();
-  expect(second).not.toBeNull();
-  expect(state.fileNodeBudget).toBe(0);
-  expect(state.fileNodesDropped).toBe(false);
-
-  expect(addSemanticGraphNode(state, semanticNodeFor("first"))).toBe(first);
-  expect(state.fileNodesDropped).toBe(false);
-
-  const blocked = addSemanticGraphNode(state, semanticNodeFor("third"));
-  expect(blocked).toBeNull();
-  expect(state.fileNodesDropped).toBe(true);
+  expect(graph.coverage.files).toMatchObject([
+    { module_path: "app.js", status: "complete", graph_byte_budget: null },
+  ]);
 });
 
 it("keeps full static property identities distinct through backward provenance", () => {
@@ -908,47 +990,39 @@ it.each(["{}", "unknownRoot", "{ a: null }"])(
   },
 );
 
-it("projects and adopts more than the default per-file capacity when explicitly offered", () => {
-  const text = "external;\n".repeat(20_001);
-  const file: JavaScriptArtifactFile = {
-    path: "large.js",
-    container_sha256: SHA256,
-    sha256: SHA256,
-    bytes: Buffer.byteLength(text),
-    inventory_artifact_id: `art_${SHA256}`,
-    kind: "javascript",
-    unpacked: false,
-    text: { included: true, value: text },
-  };
-  const steps = projectJavaScriptSemanticFileSteps(
-    file,
-    analyzeJavaScriptSemantics(text),
-    20_002,
-  );
-  let result = steps.next();
-  while (!result.done) result = steps.next();
-  expect(result.value.nodes).toHaveLength(20_002);
-  expect(result.value.truncated).toBe(false);
+it("bounds a source by a caller-selected node capacity and checks adopted capacity", () => {
+  const full = projectWithin(BUDGET_SOURCE, null);
+  const capped = projectWithin(BUDGET_SOURCE, null, 30);
+  expect(capped.nodes).toHaveLength(30);
+  expect(capped.coverage).toMatchObject({
+    status: "truncated",
+    omitted_nodes: full.nodes.length - 30,
+  });
   const projection = createJavaScriptSemanticGraphProjection({
-    totalNodes: 20_010,
-    fileNodes: 20_002,
+    totalNodes: 35,
+    fileNodes: 30,
   });
-  projection.adoptFileProjection(result.value);
-  expect(projection.remainingFileNodeBudget()).toBe(8);
-  const graph = projection.finish(SHA256, {
-    graph_id: `jag_${"b".repeat(64)}`,
-    nodes: [],
-  });
-  expect(graph.coverage).toMatchObject({
-    truncated: false,
-    omitted_nodes: 0,
-    omitted_relations: 0,
-  });
-  const bounded = createJavaScriptSemanticGraphProjection({
-    totalNodes: 20_001,
-    fileNodes: 20_002,
-  });
-  expect(() => bounded.adoptFileProjection(result.value)).toThrow(
-    "exceed the offered tree capacity",
+  expect(projection.remainingFileNodeBudget()).toBe(30);
+  projection.adoptFileProjection(budgetFile(BUDGET_SOURCE), capped);
+  expect(projection.remainingFileNodeBudget()).toBe(5);
+  const graph = projection.finish(
+    SHA256,
+    { graph_id: `jag_${"b".repeat(64)}`, nodes: [] },
+    [],
   );
+  expect(graph.coverage).toMatchObject({
+    truncated: true,
+    omitted_nodes: full.nodes.length - 30,
+    limits: [
+      { name: "semantic_graph_file_node_ceiling", value: 30, unit: "items" },
+      { name: "semantic_graph_node_ceiling", value: 35, unit: "items" },
+    ],
+  });
+  expect(
+    createJavaScriptSemanticGraphProjection().remainingFileNodeBudget(),
+  ).toBeNull();
+  const bounded = createJavaScriptSemanticGraphProjection({ totalNodes: 29 });
+  expect(() =>
+    bounded.adoptFileProjection(budgetFile(BUDGET_SOURCE), capped),
+  ).toThrow("exceed the offered node capacity");
 });

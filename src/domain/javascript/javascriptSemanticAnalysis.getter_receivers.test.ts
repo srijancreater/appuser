@@ -194,3 +194,33 @@ describe("getter receiver mutation aliases (#1665, #2654)", () => {
     ).toMatchObject({ status: "literal", value: 1 });
   });
 });
+
+describe("getters reached through unknown receiver keys", () => {
+  // Undici-style classes read `this[symbol].name` in every getter. Each
+  // unknown key can select any getter again, which enumerated every getter
+  // ordering and overflowed the stack on Grok Bot's main process bundle.
+  const getters = Array.from(
+    { length: 24 },
+    (_, index) =>
+      `get g${String(index)}() { return this[k].n${String(index)}; }`,
+  ).join(" ");
+  it.each([
+    ["one unknown hop", "new R().g7.x = 2;"],
+    ["a second unknown hop", "new R().g7.n3.x = 2;"],
+  ])("bounds expansion and keeps writes through %s", (_shape, write) => {
+    const start = performance.now();
+    const value = resultValue(
+      `const k = Symbol("state"); const shared = { x: 1 }; class R { constructor() { this[k] = { n7: shared }; } ${getters} } ${write} return shared.x;`,
+    );
+    expect(performance.now() - start).toBeLessThan(2000);
+    expect(value?.status).toBe("unknown");
+  });
+
+  it("keeps a literal no getter can return", () => {
+    expect(
+      resultValue(
+        `const k = Symbol("state"); const shared = { x: 1 }; const other = { x: 1 }; class R { constructor() { this[k] = { n7: other }; } ${getters} } new R().g7.n3.x = 2; return shared.x;`,
+      ),
+    ).toMatchObject({ status: "literal", value: 1 });
+  });
+});

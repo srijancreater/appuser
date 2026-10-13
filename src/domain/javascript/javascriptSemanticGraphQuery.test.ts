@@ -571,10 +571,20 @@ const invalidGraphCases: {
       input.coverage.families = input.coverage.families.map((family) => ({
         ...family,
         retained_relations: family.retained_relations + 1,
-        unknown_ids: [`jsrg_unknown_${"f".repeat(64)}`],
+        retained_unknowns: family.retained_unknowns + 1,
       }));
     },
     message: "Family retained relation count does not match graph content",
+  },
+  {
+    label: "retained unknown counts",
+    change: (input) => {
+      input.coverage.families = input.coverage.families.map((family) => ({
+        ...family,
+        retained_unknowns: family.retained_unknowns + 1,
+      }));
+    },
+    message: "Family retained unknown count does not match graph content",
   },
 ];
 

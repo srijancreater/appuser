@@ -1,5 +1,10 @@
 import { compareUnicodeCodePoints } from "../../domain/unicodeCodePointOrder.js";
-import type { ElectronIpcFinding } from "../../domain/javascript/electronStaticAnalysisTypes.js";
+import { posix } from "node:path";
+
+import type {
+  ElectronIpcFinding,
+  ElectronNativeAddonBindingFinding,
+} from "../../domain/javascript/electronStaticAnalysisTypes.js";
 import type { ElectronBoundarySummary } from "../../domain/javascript/javascriptApplicationAnalysis.js";
 import type { JavaScriptModuleArtifactAnalysis } from "./JavaScriptArtifactAnalysisTypes.js";
 import type { JavaScriptArtifactFile } from "../../domain/javascript/javascriptArtifactFiles.js";
@@ -18,11 +23,15 @@ export interface ElectronIpcPairing {
   readonly handler: ElectronIpcRecord;
 }
 
-/** Pairing state for one renderer transmission without overclaiming ambiguity. */
+/**
+ * Pairing state for one renderer transmission without overclaiming
+ * ambiguity. A unique match is guarded when either operation was only
+ * reached under unresolved predicates.
+ */
 export interface ElectronIpcPairingState {
   readonly transmission: ElectronIpcRecord;
   readonly candidates: readonly ElectronIpcRecord[];
-  readonly status: "paired" | "ambiguous" | "unpaired";
+  readonly status: "paired" | "guarded" | "ambiguous" | "unpaired";
 }
 
 /** Flatten all per-file IPC facts into deterministic application records. */
@@ -53,12 +62,16 @@ export const classifyElectronIpcPairings = (
               handler.finding.channel === transmission.finding.channel &&
               compatibleIpcModes(transmission.finding, handler.finding),
           );
+    const [candidate] = candidates;
     return {
       transmission,
       candidates,
       status:
-        candidates.length === 1
-          ? "paired"
+        candidate !== undefined && candidates.length === 1
+          ? transmission.finding.guard_alternatives === undefined &&
+            candidate.finding.guard_alternatives === undefined
+            ? "paired"
+            : "guarded"
           : candidates.length > 1
             ? "ambiguous"
             : "unpaired",
@@ -88,6 +101,18 @@ export const summarizeElectronBoundaries = (
   const windows = javascript.flatMap(
     ({ electron }) => electron.browser_windows,
   );
+  const policies = [
+    ...javascript.flatMap(({ electron }) => electron.content_security_policies),
+    ...analysis.html_policies.map(({ policy }) => policy),
+  ];
+  const identities = javascript.flatMap(({ electron }) =>
+    [
+      ...electron.browser_windows,
+      ...electron.context_bridge_apis,
+      ...electron.ipc,
+      ...electron.utility_processes,
+    ].map(({ electron_identity: identity }) => identity),
+  );
   const bridges = javascript.flatMap(
     ({ electron }) => electron.context_bridge_apis,
   );
@@ -114,14 +139,28 @@ export const summarizeElectronBoundaries = (
     ),
   );
   return {
-    browser_windows: windows.length,
+    browser_windows: windows.filter(({ api }) => api === "BrowserWindow")
+      .length,
+    web_contents_views: windows.filter(({ api }) => api !== "BrowserWindow")
+      .length,
+    webview_attach_handlers: javascript.reduce(
+      (count, { electron }) => count + electron.webview_attachments.length,
+      0,
+    ),
     explicit_web_preferences: windows.reduce(
       (count, window) => count + window.web_preferences.length,
       0,
     ),
-    preload_entrypoints: windows.filter(
-      ({ preload_path: path }) => path !== null,
-    ).length,
+    preload_entrypoints:
+      windows.filter(({ preload_path: path }) => path !== null).length +
+      javascript.reduce(
+        (count, { electron }) =>
+          count +
+          electron.webview_attachments.filter(
+            ({ preload_path: path }) => path !== null,
+          ).length,
+        0,
+      ),
     context_bridge_apis: bridges.length,
     exposed_api_members: bridges.reduce(
       (count, bridge) => count + bridge.members.length,
@@ -141,6 +180,9 @@ export const summarizeElectronBoundaries = (
       main_handlers: ipc.filter(isMainHandler).length,
       paired_renderer_transmissions: pairing.filter(
         ({ status }) => status === "paired",
+      ).length,
+      guarded_renderer_transmissions: pairing.filter(
+        ({ status }) => status === "guarded",
       ).length,
       ambiguous_renderer_transmissions: pairing.filter(
         ({ status }) => status === "ambiguous",
@@ -163,16 +205,18 @@ export const summarizeElectronBoundaries = (
         }),
     ).length,
     native_addon_bindings: nativeBindings.length,
-    resolved_native_addon_bindings: nativeBindings.filter(({ file, finding }) =>
-      resolvesToFile({
-        file,
-        specifier: finding.specifier,
-        context: "module-specifier",
-        files,
-        kind: "native-addon",
-        moduleKind: finding.module_kind,
-      }),
+    resolved_native_addon_bindings: nativeBindings.filter(
+      ({ file, finding }) =>
+        resolveElectronNativeAddon(file, finding, files).resolved_path !== null,
     ).length,
+    inferred_api_identity_findings: identities.filter(
+      ({ basis }) => basis !== "module-binding",
+    ).length,
+    content_security_policies: policies.length,
+    content_security_policy_concerns: policies.reduce(
+      (count, { concerns }) => count + concerns.length,
+      0,
+    ),
   };
 };
 
@@ -205,6 +249,108 @@ interface ResolveToFileInput {
   readonly kind?: JavaScriptArtifactFile["kind"];
   readonly moduleKind?: "import" | "require";
 }
+
+/** Where a JavaScript-side native binding points in the inventory. */
+export interface ElectronNativeAddonResolution {
+  readonly resolved_path: string | null;
+  /** Inventoried `.node` files the loader could select. */
+  readonly candidates: readonly string[];
+  readonly basis:
+    | "specifier"
+    | "loader-package-root"
+    | "create-require-base-unavailable";
+}
+
+// node-gyp-build and bindings search their package's build and prebuild trees.
+const LOADER_ADDON =
+  /^(?:build\/(?:Release|Debug)|prebuilds\/[^/]+)\/[^/]+\.node$/u;
+
+/**
+ * Resolve one native binding. A specifier is resolved as a module or
+ * filesystem path. `bindings` and `node-gyp-build` select a file at runtime,
+ * so their candidates are the add-ons in the build and prebuild directories of
+ * the nearest inventoried package root; one candidate resolves, more remain
+ * candidates. `bindings` candidates must also match the requested name.
+ */
+export const resolveElectronNativeAddon = (
+  file: JavaScriptArtifactFile,
+  finding: ElectronNativeAddonBindingFinding,
+  files: ReadonlyMap<string, JavaScriptArtifactFile>,
+): ElectronNativeAddonResolution => {
+  if (finding.loader === "bindings" || finding.loader === "node-gyp-build") {
+    const root = packageRoot(file.path, files);
+    const wanted =
+      finding.loader === "bindings" && finding.specifier_status === "literal"
+        ? finding.specifier.replace(/\.node$/u, "") + ".node"
+        : undefined;
+    const candidates =
+      root === undefined
+        ? []
+        : [...files.values()]
+            .filter(({ path, kind }) => {
+              const relative = root === "" ? path : path.slice(root.length + 1);
+              return (
+                kind === "native-addon" &&
+                (root === "" || path.startsWith(`${root}/`)) &&
+                LOADER_ADDON.test(relative) &&
+                (wanted === undefined || posix.basename(path) === wanted)
+              );
+            })
+            .map(({ path }) => path)
+            .sort(compareUnicodeCodePoints);
+    return {
+      resolved_path: candidates.length === 1 ? (candidates[0] ?? null) : null,
+      candidates,
+      basis: "loader-package-root",
+    };
+  }
+  // The classifier does not yet retain createRequire's base filename. A
+  // caller-relative fallback could select a different add-on with the same name.
+  if (finding.loader === "create-require")
+    return {
+      resolved_path: null,
+      candidates: [],
+      basis: "create-require-base-unavailable",
+    };
+  const resolved =
+    finding.specifier_status === "literal"
+      ? resolveArtifactPathByContext({
+          declaredPath: finding.specifier,
+          sourcePath: file.path,
+          context:
+            finding.loader === "process-dlopen"
+              ? "filesystem-expression"
+              : "module-specifier",
+          files,
+          moduleKind: finding.module_kind,
+        }).resolved_path
+      : null;
+  const addon =
+    resolved !== null && files.get(resolved)?.kind === "native-addon"
+      ? resolved
+      : null;
+  return {
+    resolved_path: addon,
+    candidates: addon === null ? [] : [addon],
+    basis: "specifier",
+  };
+};
+
+const packageRoot = (
+  path: string,
+  files: ReadonlyMap<string, JavaScriptArtifactFile>,
+): string | undefined => {
+  for (
+    let directory = posix.dirname(path);
+    ;
+    directory = posix.dirname(directory)
+  ) {
+    const root = directory === "." ? "" : directory;
+    if (files.has(root === "" ? "package.json" : `${root}/package.json`))
+      return root;
+    if (root === "") return undefined;
+  }
+};
 
 const resolvesToFile = (input: ResolveToFileInput): boolean => {
   const resolved = resolveArtifactPathByContext({

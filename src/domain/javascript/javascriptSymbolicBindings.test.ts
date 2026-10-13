@@ -385,9 +385,9 @@ it.each([
     { kind: "literal", value: "last" },
   ],
   [
-    "a final accessor is unknown",
+    "a final getter is evaluated",
     `const object = { value: "first", get value() { return "accessor"; } }; inspect(object.value);`,
-    { kind: "unknown", reason: "accessor property" },
+    { kind: "literal", value: "accessor" },
   ],
   [
     "a later literal overwrites an accessor",
@@ -437,4 +437,111 @@ it("propagates branch guards through object properties and function calls", () =
       false,
     ]);
   }
+});
+
+it.each([
+  [
+    "template literals",
+    "inspect(`a:${'b'}:${1}`);",
+    { kind: "literal", value: "a:b:1" },
+  ],
+  [
+    "string concatenation",
+    `inspect("a" + ":" + 2);`,
+    { kind: "literal", value: "a:2" },
+  ],
+  [
+    "a nullish comparison of an object",
+    `const o = {}; inspect(o != null);`,
+    { kind: "literal", value: true },
+  ],
+  [
+    "a computed member with a folded key",
+    `const o = { ab: "x" }; inspect(o["a" + "b"]);`,
+    { kind: "literal", value: "x" },
+  ],
+  [
+    "an absent key of a closed literal",
+    `const o = { a: 1 }; inspect(o.b);`,
+    { kind: "literal", value: undefined },
+  ],
+  [
+    "an absent key that names an inherited member",
+    `const o = { a: 1 }; inspect(o.toString);`,
+    { kind: "unknown", reason: "missing property" },
+  ],
+  [
+    "a mapped entry of an exact object",
+    `inspect(Object.entries({ a: 1, 2: "two" }).map(([key]) => key)[0]);`,
+    { kind: "literal", value: "2" },
+  ],
+  [
+    "a destructured parameter default",
+    `function f({ a } = { a: "d" }) { return a; } inspect(f());`,
+    { kind: "literal", value: "d" },
+  ],
+  [
+    "a member written per iterated key",
+    `function f(keys) { const o = {}; for (const k of keys) o[k] = k + "!"; return o; } inspect(f(["a", "b"]).b);`,
+    { kind: "literal", value: "b!" },
+  ],
+  [
+    "a member written under an unresolved guard",
+    `const o = {}; flag && (o.a = 1); inspect(o.a);`,
+    { kind: "unknown", reason: "conditional member write" },
+  ],
+  [
+    "an array mutated in place",
+    `const a = [1]; a.push(2); inspect(a);`,
+    { kind: "unknown", reason: "dynamic member writes" },
+  ],
+] as const)("folds %s", (_case, source, expected) => {
+  expect(inspectOne(source)).toEqual(expected);
+});
+
+it("loads esbuild CommonJS wrappers and namespace conversions", () => {
+  const value = inspectOne(`
+    var create=Object.create,defProp=Object.defineProperty,desc=Object.getOwnPropertyDescriptor,names=Object.getOwnPropertyNames,proto=Object.getPrototypeOf,has=Object.prototype.hasOwnProperty;
+    var cjs=(cb,mod)=>()=>(mod||cb((mod={exports:{}}).exports,mod),mod.exports);
+    var copy=(to,from,except,d)=>{if(from&&typeof from=="object"||typeof from=="function")for(let key of names(from))!has.call(to,key)&&key!==except&&defProp(to,key,{get:()=>from[key],enumerable:!(d=desc(from,key))||d.enumerable});return to};
+    var toEsm=(mod,node,target)=>(target=mod!=null?create(proto(mod)):{},copy(node||!mod||!mod.__esModule?defProp(target,"default",{value:mod,enumerable:!0}):target,mod));
+    var lib=cjs((exports,module)=>{module.exports={channel:"lib:ping"}});
+    var converted=toEsm(lib());
+    inspect(converted.channel);
+  `);
+  expect(value).toEqual({ kind: "literal", value: "lib:ping" });
+});
+
+it("folds each predicated operand alternative under its own predicate", () => {
+  const value = inspectOne(`inspect("app:" + (flag ? "a" : "b"));`);
+  expect(
+    symbolicVariants(value).map((variant) => [
+      variant.kind === "literal" ? variant.value : variant.kind,
+      variant.conditions?.map(({ positive }) => positive),
+    ]),
+  ).toEqual([
+    ["app:a", [true]],
+    ["app:b", [false]],
+  ]);
+});
+
+it("compares an object with nullish values but not with coerced primitives", () => {
+  const values = inspectedValues(`const options = {};
+    inspect(options == null); inspect(options !== undefined); inspect(options === "x"); inspect(options == "x");`);
+  expect(
+    values.map((value) =>
+      value.kind === "literal" ? value.value : value.kind,
+    ),
+  ).toEqual([false, true, false, "unknown"]);
+});
+
+it.each([
+  `const o = { channel: 'app:' }; o.channel += 'open'; inspect(o.channel);`,
+  `const channels = ['a']; const alias = channels; alias.push('b'); inspect(channels);`,
+  `const channels = ['a']; const alias = channels; alias[key] = 'b'; inspect(channels);`,
+  `const channels = ['a']; const alias = channels; channels?.push?.('b'); inspect(alias);`,
+  `const o = {}; for (const k of ['a', 'b']) { o[k] = k; break; } inspect(o.b);`,
+  `const o = {}; for (const k of ['a', 'b']) { if (flag) continue; o[k] = k; } inspect(o.b);`,
+])("keeps unsupported writes and stopped iterations unknown: %s", (source) => {
+  expect(inspectOne(source).kind).toBe("unknown");
 });

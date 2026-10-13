@@ -1,13 +1,14 @@
 import * as t from "@babel/types";
 
 import type {
+  ElectronIpcChannel,
   ElectronIpcDescriptor,
   ElectronIpcFinding,
   ElectronSenderValidationFinding,
 } from "./electronStaticAnalysisTypes.js";
 import {
   boundedExpression,
-  electronCalleePath,
+  electronCallee,
   electronStaticValue,
   handlerKind,
 } from "./electronStaticAnalysisValues.js";
@@ -37,24 +38,24 @@ const inspectIpcCall = (
   node: t.CallExpression | t.OptionalCallExpression,
   context: JavaScriptFindingContext,
 ): void => {
-  const descriptor = ipcDescriptor(electronCalleePath(node.callee, context));
-  if (descriptor === undefined) return;
+  const callee = electronCallee(node.callee, context);
+  const descriptor = ipcDescriptor(callee?.path);
+  if (callee === undefined || descriptor === undefined) return;
   const channelNode = argumentNode(node.arguments[0]);
-  const channelValue = electronStaticValue(context.source, channelNode);
-  const channel =
-    channelValue.status === "literal" && typeof channelValue.value === "string"
-      ? channelValue.value
-      : null;
-  const channelReference =
-    channel === null
+  const channelValue = electronStaticValue(context, channelNode);
+  const channelReference: ElectronIpcChannel =
+    typeof channelValue.value !== "string"
       ? {
           channel: null,
-          channel_expression:
-            channelValue.status === "dynamic"
-              ? channelValue.expression
-              : boundedExpression(context.source, channelNode),
+          channel_expression: boundedExpression(context.source, channelNode),
         }
-      : { channel, channel_expression: null };
+      : channelValue.status === "derived"
+        ? {
+            channel: channelValue.value,
+            channel_expression: channelValue.expression,
+          }
+        : { channel: channelValue.value, channel_expression: null };
+  const channel = channelReference.channel;
   const handlerNode =
     descriptor.mode === "listen" || descriptor.mode === "handle"
       ? argumentNode(node.arguments[1])
@@ -89,6 +90,7 @@ const inspectIpcCall = (
   const finding: ElectronIpcFinding = {
     ...findingState,
     ...channelReference,
+    electron_identity: callee.identity,
     module_key: null,
     location: range(node),
   };
@@ -112,7 +114,7 @@ const inspectValidationComparison = (
   addValidation(context, node, {
     subject: left ?? right ?? "sender-frame",
     mechanism: `comparison:${node.operator}`,
-    expected: electronStaticValue(context.source, expected),
+    expected: electronStaticValue(context, expected),
   });
 };
 
@@ -137,10 +139,7 @@ const inspectValidationCall = (
   addValidation(context, node, {
     subject,
     mechanism: `call:${method}`,
-    expected: electronStaticValue(
-      context.source,
-      argumentNode(node.arguments[0]),
-    ),
+    expected: electronStaticValue(context, argumentNode(node.arguments[0])),
   });
 };
 
@@ -166,9 +165,9 @@ const addValidation = (
       "electron-validation",
       input.subject,
       input.mechanism,
-      input.expected.status === "literal"
-        ? String(input.expected.value)
-        : input.expected.expression,
+      input.expected.status === "dynamic"
+        ? input.expected.expression
+        : String(input.expected.value),
     ]),
     node,
     value: finding,

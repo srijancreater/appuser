@@ -1,3 +1,4 @@
+import type { ElectronContentSecurityPolicyFinding } from "../../domain/javascript/electronStaticAnalysisTypes.js";
 import type { JavaScriptSourceMapReference } from "../../domain/javascript/javascriptSourceMapPaths.js";
 import type {
   JavaScriptSourceRange,
@@ -43,6 +44,12 @@ export interface JavaScriptHtmlScriptObservation {
   readonly script_path: string;
   readonly base_href: string | null;
   readonly location: JavaScriptSourceRange;
+}
+
+/** One `<meta http-equiv="Content-Security-Policy">` in an HTML file. */
+export interface JavaScriptHtmlPolicyObservation {
+  readonly html_path: string;
+  readonly policy: ElectronContentSecurityPolicyFinding;
 }
 
 /** One original source declared by a local source map. */
@@ -128,6 +135,7 @@ export interface JavaScriptArtifactAnalysis<
   readonly packages: readonly JavaScriptPackageObservation[];
   readonly json_modules: readonly JavaScriptJsonModuleObservation[];
   readonly html_scripts: readonly JavaScriptHtmlScriptObservation[];
+  readonly html_policies: readonly JavaScriptHtmlPolicyObservation[];
   readonly source_maps: readonly JavaScriptSourceMapObservation[];
   readonly visited_ast_nodes: number;
   readonly findings: number;

@@ -7,7 +7,7 @@ const INFERENCE_LIMITATION =
 
 /** Exact artifact-backed syntax evidence for one semantic graph node. */
 export const observedSemanticEvidence = (
-  file: JavaScriptArtifactFile,
+  file: Pick<JavaScriptArtifactFile, "path" | "sha256">,
   location: JavaScriptSourceRange | null,
 ): ApplicationGraphEvidence => ({
   authority: "ast-static-analysis",
@@ -54,7 +54,7 @@ export const inferredSemanticEvidence = (
 
 /** Static relationship evidence anchored at the syntax that proves the link. */
 export const inferredSemanticEvidenceAt = (
-  file: JavaScriptArtifactFile,
+  file: Pick<JavaScriptArtifactFile, "path" | "sha256">,
   location: JavaScriptSourceRange,
 ): ApplicationGraphEvidence => ({
   ...observedSemanticEvidence(file, location),
@@ -99,7 +99,7 @@ export const unavailableSemanticRootEvidence = (
 
 /** Explicit unknown evidence at one unresolved dynamic syntax location. */
 export const unknownSemanticEvidence = (
-  file: JavaScriptArtifactFile,
+  file: Pick<JavaScriptArtifactFile, "path" | "sha256">,
   location: JavaScriptSourceRange | null,
 ): ApplicationGraphEvidence => ({
   ...observedSemanticEvidence(file, location),

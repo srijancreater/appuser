@@ -139,7 +139,17 @@ const itemViewSchema = z.discriminatedUnion("collection", [
 ]);
 const pageViewSchema = z.strictObject({
   kind: z.literal("page"),
-  collection: z.enum(["sections", "symbols", "modules"]),
+  collection: z
+    .enum([
+      "sections",
+      "symbols",
+      "modules",
+      "semantic_files",
+      "semantic_unknowns",
+    ])
+    .describe(
+      "sections/symbols page binary layouts. modules, semantic_files (per-source semantic coverage and exact unknown counts) and semantic_unknowns (retained unknown frontiers by source) page JavaScript application Evidence.",
+    ),
   offset: z.number().int().nonnegative(),
   limit: z.number().int().positive(),
 });

@@ -1,5 +1,8 @@
 import type { ApplicationNode } from "../../domain/javascript/javascriptApplicationGraphSchemas.js";
-import type { ElectronSenderValidationFinding } from "../../domain/javascript/electronStaticAnalysisTypes.js";
+import type {
+  ElectronIpcFinding,
+  ElectronSenderValidationFinding,
+} from "../../domain/javascript/electronStaticAnalysisTypes.js";
 import type { JavaScriptArtifactFile } from "../../domain/javascript/javascriptArtifactFiles.js";
 import {
   artifactLocalIdentity,
@@ -17,8 +20,9 @@ import {
   type ElectronIpcRecord,
 } from "./ElectronBoundaryAnalysis.js";
 import {
-  addElectronAstEdge,
+  addElectronApiEdge,
   addElectronInferenceEdge,
+  electronApiEvidence,
   electronFindingSourceNode,
   electronObservationIdentity,
   electronRangeContains,
@@ -106,7 +110,7 @@ const addIpcRecord = (
       operation: record.finding.operation,
       channel: record.finding.channel,
       channel_expression: record.finding.channel_expression,
-      resolution: record.finding.channel === null ? "dynamic" : "literal",
+      resolution: channelResolution(record.finding),
     },
   });
 };
@@ -144,23 +148,39 @@ const addChannelNode = (
           mode: finding.mode,
           channel: finding.channel,
           channel_expression: finding.channel_expression,
-          resolution: finding.channel === null ? "dynamic" : "literal",
+          resolution: channelResolution(finding),
+          electron_identity: finding.electron_identity,
           ...(finding.invocation_location === undefined
             ? {}
             : { invocation_location: finding.invocation_location }),
+          ...(finding.guard_alternatives === undefined
+            ? {}
+            : { guard_alternatives: finding.guard_alternatives }),
+          ...(finding.linked_operation === undefined
+            ? {}
+            : { linked_operation: finding.linked_operation }),
         },
-        evidence: (finding.resolution_basis === "wrapper-substitution"
-          ? staticInferenceEvidence
-          : astObservationEvidence)({
-          sha256: file.sha256,
-          path: file.path,
+        evidence: electronApiEvidence({
+          file,
+          resolutionBasis: finding.resolution_basis,
           range: finding.location,
           operation: "observe-ipc-channel-expression",
           coverage,
+          identity: finding.electron_identity,
           limitations:
             finding.resolution_basis === "wrapper-substitution"
               ? [
                   "The channel is inferred through lexical wrapper substitution; runtime registration and dispatch remain unverified.",
+                  ...(finding.guard_alternatives === undefined
+                    ? []
+                    : [
+                        "The operation was only reached under the listed unresolved predicates and is not a pairing match.",
+                      ]),
+                  ...(finding.linked_operation === undefined
+                    ? []
+                    : [
+                        "The Electron call lies in a linked source reached through a global symbol registry slot; sharing one realm at runtime is assumed.",
+                      ]),
                 ]
               : finding.channel === null
                 ? [
@@ -195,23 +215,29 @@ const addHandlerNode = (input: IpcHandlerInput): ApplicationNode => {
           channel_expression: finding.channel_expression,
           handler_kind: finding.handler_kind,
           handler_location: finding.handler_location,
+          electron_identity: finding.electron_identity,
           ...(finding.invocation_location === undefined
             ? {}
             : { invocation_location: finding.invocation_location }),
+          ...(finding.guard_alternatives === undefined
+            ? {}
+            : { guard_alternatives: finding.guard_alternatives }),
+          ...(finding.linked_operation === undefined
+            ? {}
+            : { linked_operation: finding.linked_operation }),
         },
-        evidence: (finding.resolution_basis === "wrapper-substitution"
-          ? staticInferenceEvidence
-          : astObservationEvidence)({
-          sha256: file.sha256,
-          path: file.path,
+        evidence: electronApiEvidence({
+          file,
+          resolutionBasis: finding.resolution_basis,
           range: handlerRange,
           operation: "observe-ipc-handler",
           coverage,
+          identity: finding.electron_identity,
         }),
       },
     ],
   });
-  addElectronAstEdge(context, {
+  addElectronApiEdge(context, finding.electron_identity, {
     source,
     target: handler,
     file,
@@ -232,7 +258,7 @@ const addHandlerNode = (input: IpcHandlerInput): ApplicationNode => {
     properties: {
       channel: finding.channel,
       channel_expression: finding.channel_expression,
-      resolution: finding.channel === null ? "dynamic" : "literal",
+      resolution: channelResolution(finding),
       ...(finding.invocation_location === undefined
         ? {}
         : { invocation_location: finding.invocation_location }),
@@ -248,6 +274,9 @@ const addLiteralPairings = (state: IpcGraphState): void => {
     const coverage = coverageFor(state.context, pairing.transmission.file);
     if (source === undefined || handler === undefined || coverage === undefined)
       continue;
+    const derived =
+      pairing.transmission.finding.channel_expression !== null ||
+      pairing.handler.finding.channel_expression !== null;
     addElectronInferenceEdge(state.context, {
       source,
       target: handler,
@@ -259,12 +288,19 @@ const addLiteralPairings = (state: IpcGraphState): void => {
       operation: "pair-ipc-literal-channel",
       properties: {
         channel: pairing.transmission.finding.channel,
-        pairing_basis: "unique-exact-literal-channel",
+        pairing_basis: derived
+          ? "unique-exact-derived-channel"
+          : "unique-exact-literal-channel",
         handler_path: pairing.handler.file.path,
         handler_operation: pairing.handler.finding.operation,
       },
       limitations: [
         "Literal channel equality does not prove that the handler is registered or reachable at runtime.",
+        ...(derived
+          ? [
+              "At least one channel was folded from a constant expression rather than spelled as a literal.",
+            ]
+          : []),
       ],
     });
   }
@@ -369,3 +405,12 @@ const coverageFor = (
     ? undefined
     : javascriptAnalysisCoverage(javascript);
 };
+
+const channelResolution = (
+  finding: ElectronIpcFinding,
+): "literal" | "derived" | "dynamic" =>
+  finding.channel === null
+    ? "dynamic"
+    : finding.channel_expression === null
+      ? "literal"
+      : "derived";

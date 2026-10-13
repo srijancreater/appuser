@@ -37,11 +37,18 @@ export type JavaScriptStaticReference = JavaScriptStaticReferenceState &
     | { readonly specifier: null; readonly expression: string }
   );
 
-/** A route or network endpoint literal observed in syntax. */
+/**
+ * A route or network endpoint value observed at a recognized call site or
+ * route declaration, or a URL-like value present in string data.
+ */
 export interface JavaScriptStaticEndpoint {
-  readonly kind: "route" | "network";
+  readonly kind: "route" | "network" | "data";
   readonly value: string;
+  /** Source expression when the value was derived rather than spelled literally. */
+  readonly expression: string | null;
   readonly mechanism: string;
+  /** Static keys from the nearest named container to a data value. */
+  readonly property_path: readonly string[] | null;
   readonly module_key: string | null;
   /** Recovered factory runtime; absent in older or unbundled findings. */
   readonly module_runtime?: string;
@@ -122,6 +129,10 @@ export interface JavaScriptStaticAnalysis {
   }[];
   readonly vendors: readonly string[];
   readonly electron: ElectronStaticFindings;
+  /** Whether finding values could be folded beyond literal syntax. */
+  readonly constant_folding:
+    | { readonly status: "available" }
+    | { readonly status: "unavailable"; readonly reason: string };
   readonly limitations: readonly string[];
 }
 

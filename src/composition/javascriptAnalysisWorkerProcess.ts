@@ -8,6 +8,7 @@ import {
 import { failedJavaScriptStaticAnalysis } from "../domain/javascript/javascriptStaticAnalysisHelpers.js";
 import { projectJavaScriptModuleSemantics } from "../domain/javascript/javascriptModuleSemanticIr.js";
 import {
+  javaScriptGraphBytesWithinRetention,
   javaScriptTransferByteBudget,
   measureJavaScriptModuleTransfer,
 } from "../javascript/analysis/JavaScriptAnalysisTransfer.js";
@@ -21,6 +22,7 @@ import {
 
 const analyze: JavaScriptSourceWorkerAnalyzer = async (
   file,
+  companions,
   nodeBudget,
   callbacks,
 ) => {
@@ -41,9 +43,11 @@ const analyze: JavaScriptSourceWorkerAnalyzer = async (
       file.text.value,
       parsed,
       receivers,
+      companions,
     ),
   );
-  const resultBudgetBytes = await callbacks.checkpoint(facts);
+  const admission = await callbacks.checkpoint(facts);
+  const resultBudgetBytes = admission.resultBytes;
   if (facts.parse_status === "failed") return null;
   if (resultBudgetBytes === 0)
     throw new AnalysisResourceConstraintError(
@@ -80,6 +84,12 @@ const analyze: JavaScriptSourceWorkerAnalyzer = async (
     projectJavaScriptSemanticFileSteps(
       file,
       ir,
+      Math.min(
+        admission.graphBytes,
+        javaScriptGraphBytesWithinRetention(
+          resultBudgetBytes - measured.retentionBytes,
+        ),
+      ),
       nodeBudget,
       facts.electron.call_paths,
     ),

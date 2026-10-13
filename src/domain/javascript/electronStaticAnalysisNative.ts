@@ -11,13 +11,19 @@ import {
   argumentNode,
   calleeName,
   range,
+  staticPath,
   stringValue,
 } from "./javascriptStaticAnalysisHelpers.js";
 import {
   propertyName,
   semanticStaticPropertyKey,
 } from "./javascriptAstValues.js";
-import type { JavaScriptFindingContext } from "./javascriptStaticAnalysisState.js";
+import type {
+  JavaScriptFindingContext,
+  JavaScriptNativeLoaderCall,
+} from "./javascriptStaticAnalysisState.js";
+import { addReference } from "./javascriptStaticAnalysisCalls.js";
+import { boundedExpression } from "./electronStaticAnalysisValues.js";
 
 interface NativeBindingInput {
   readonly context: JavaScriptFindingContext;
@@ -28,6 +34,11 @@ interface NativeBindingInput {
   readonly members: readonly string[];
   readonly namespaceAccess: boolean;
   readonly dynamicMemberAccess: boolean;
+  readonly loader?: {
+    readonly name: JavaScriptNativeLoaderCall["loader"];
+    readonly basis: JavaScriptNativeLoaderCall["basis"];
+    readonly static: boolean;
+  };
 }
 
 /** Inspect JavaScript-side imports and re-exports of native .node addons. */
@@ -40,6 +51,49 @@ export const inspectElectronNativeNode = (
   else if (t.isExportAllDeclaration(node)) inspectExportAll(node, context);
   else if (t.isVariableDeclarator(node)) inspectRequireBinding(node, context);
   else if (t.isAssignmentExpression(node)) inspectReExport(node, context);
+  else if (t.isCallExpression(node) || t.isOptionalCallExpression(node))
+    inspectLoaderCall(node, context);
+};
+
+// Loader calls report the loaded module; members read from their result are
+// not followed, so the whole binding is namespace access.
+const inspectLoaderCall = (
+  node: t.CallExpression | t.OptionalCallExpression,
+  context: JavaScriptFindingContext,
+): void => {
+  const call = context.electron?.loaders.get(node);
+  if (call === undefined) return;
+  const argument = argumentNode(
+    node.arguments[call.loader === "process-dlopen" ? 1 : 0],
+  );
+  const literal = argument === undefined ? undefined : stringValue(argument);
+  if (call.loader === "create-require") {
+    if (literal === undefined) return;
+    if (!isNativeSpecifier(literal, "require")) {
+      addReference(context, { kind: "require", node, specifier: literal });
+      return;
+    }
+  }
+  const path =
+    call.loader === "bindings" || argument === undefined
+      ? literal
+      : staticPath(argument);
+  if (path === undefined) context.accumulator.unknownFindings += 1;
+  addBinding({
+    context,
+    node,
+    specifier: path ?? boundedExpression(context.source, argument),
+    kind: call.loader === "create-require" ? "require" : "loader",
+    moduleKind: "require",
+    members: [],
+    namespaceAccess: true,
+    dynamicMemberAccess: false,
+    loader: {
+      name: call.loader,
+      basis: call.basis,
+      static: path !== undefined,
+    },
+  });
 };
 
 const inspectImport = (
@@ -171,6 +225,9 @@ const addBinding = (input: NativeBindingInput): void => {
       members,
       namespace_access: input.namespaceAccess,
       dynamic_member_access: input.dynamicMemberAccess,
+      loader: input.loader?.name ?? null,
+      loader_basis: input.loader?.basis ?? null,
+      specifier_status: input.loader?.static === false ? "dynamic" : "literal",
       module_key: null,
       location: range(node),
     },

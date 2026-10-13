@@ -62,6 +62,8 @@ export interface AstEdgeInput {
   readonly range: JavaScriptSourceRange;
   readonly coverage: JavaScriptArtifactGraphCoverage;
   readonly properties: Readonly<Record<string, unknown>>;
+  /** Extraction step; bundler structure unless another syntax owner applies. */
+  readonly operation?: string;
 }
 
 /** Inferred static relationship edge values. */
@@ -141,7 +143,7 @@ export const addAstContainsEdge = (
       sha256: input.file.sha256,
       path: input.file.path,
       range: input.range,
-      operation: "map-bundler-structure",
+      operation: input.operation ?? "map-bundler-structure",
       coverage: input.coverage,
     }),
   });

@@ -1,20 +1,34 @@
 import * as t from "@babel/types";
 
-import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
-import type { ElectronStaticValue } from "./electronStaticAnalysisTypes.js";
 import {
-  readExactJavaScriptLiteral,
+  compositeKey,
+  compareUnicodeCodePoints,
+} from "../unicodeCodePointOrder.js";
+import type {
+  ElectronApiIdentity,
+  ElectronStaticValue,
+} from "./electronStaticAnalysisTypes.js";
+import {
   semanticStaticPropertyKey,
   semanticStaticPropertyName,
+  unwrapJavaScriptExpression,
 } from "./javascriptAstValues.js";
 import { sourceSlice } from "./javascriptStaticAnalysisHelpers.js";
-import type { JavaScriptFindingContext } from "./javascriptStaticAnalysisState.js";
+import type {
+  ElectronApiObject,
+  JavaScriptFindingContext,
+} from "./javascriptStaticAnalysisState.js";
 
-/** Resolve a callee only when its root has a proven Electron module identity. */
-export const electronCalleePath = (
+/** Resolve a callee only when its root has a classified Electron identity. */
+export const electronCallee = (
   callee: t.Node,
   context: JavaScriptFindingContext,
-): readonly string[] | undefined => {
+):
+  | {
+      readonly path: readonly string[];
+      readonly identity: ElectronApiIdentity;
+    }
+  | undefined => {
   const members: string[] = [];
   let root = callee;
   while (t.isMemberExpression(root) || t.isOptionalMemberExpression(root)) {
@@ -23,25 +37,30 @@ export const electronCalleePath = (
     members.push(member);
     root = root.object;
   }
-  const exported = context.electronBindings?.get(root.start ?? -1);
-  return exported === undefined
+  const binding = context.electron?.callees.get(root.start ?? -1);
+  return binding === undefined
     ? undefined
-    : [...exported, ...members.toReversed()];
+    : {
+        path: [
+          ...binding.path,
+          ...members.toReversed().slice(binding.consumed_members),
+        ],
+        identity: binding.identity,
+      };
 };
 
-/** Preserve one literal value or the exact inert expression. */
+/** Preserve one literal or derived value, or the exact inert expression. */
 export const electronStaticValue = (
-  source: string,
+  context: JavaScriptFindingContext,
   node: t.Node | null | undefined,
 ): ElectronStaticValue => {
-  const literal = literalValue(node);
-  return literal.found
-    ? { status: "literal", value: literal.value, expression: null }
-    : {
-        status: "dynamic",
-        value: null,
-        expression: boundedExpression(source, node),
-      };
+  const constant = context.constants(node);
+  if (constant.status === "literal")
+    return { status: "literal", value: constant.value, expression: null };
+  const expression = boundedExpression(context.source, node);
+  return constant.status === "derived"
+    ? { status: "derived", value: constant.value, expression }
+    : { status: "dynamic", value: null, expression };
 };
 
 /** Return an actionable expression without evaluating it. */
@@ -101,51 +120,111 @@ export function handlerKind(
   return "dynamic-expression";
 }
 
-/** Collect statically visible dotted keys from one literal contextBridge API object. */
+/** Statically visible dotted keys of one contextBridge API argument. */
+export interface ContextBridgeMembers {
+  readonly status: "object-literal" | "object-binding" | "dynamic" | "missing";
+  readonly members: readonly string[];
+  /** Keys present only in one branch of a conditional object spread. */
+  readonly conditional_members: readonly string[];
+  readonly unknown: number;
+}
+
+/**
+ * Collect keys from an object literal or an identifier bound to one, following
+ * member values that are bound identifiers. A visible member write to a bound
+ * object adds one unknown, since its added keys are not enumerated.
+ */
 export const collectContextBridgeMembers = (
   node: t.Node | null | undefined,
-): {
-  readonly status: "object-literal" | "dynamic" | "missing";
-  readonly members: readonly string[];
-  readonly unknown: number;
-} => {
+  objects: ReadonlyMap<number, ElectronApiObject> | undefined,
+): ContextBridgeMembers => {
   if (node === null || node === undefined)
     return {
       status: "missing",
       members: [],
+      conditional_members: [],
       unknown: 0,
     };
-  if (!t.isObjectExpression(node))
+  const state: MemberState = {
+    members: new Map(),
+    expanded: new Set(),
+    unknown: 0,
+    objects: objects ?? new Map(),
+  };
+  const root = boundObject(node, state);
+  if (root === undefined)
     return {
       status: "dynamic",
       members: [],
+      conditional_members: [],
       unknown: 1,
     };
-  const state: { members: string[]; unknown: number } = {
-    members: [],
-    unknown: 0,
-  };
-  collectMembersAt(node, [], state);
-  const members = [...new Set(state.members)].sort(compareUnicodeCodePoints);
+  collectMembersAt(root, [], false, state);
+  const members = [...state.members.values()];
   return {
-    status: "object-literal",
-    members,
+    status: t.isObjectExpression(node) ? "object-literal" : "object-binding",
+    members: [
+      ...new Set(
+        members
+          .filter((member) => !member.conditional)
+          .map((member) => member.segments.join(".")),
+      ),
+    ].sort(compareUnicodeCodePoints),
+    conditional_members: [
+      ...new Set(
+        members
+          .filter((member) => member.conditional)
+          .map((member) => member.segments.join(".")),
+      ),
+    ].sort(compareUnicodeCodePoints),
     unknown: state.unknown,
   };
+};
+
+interface MemberState {
+  readonly members: Map<
+    string,
+    { readonly segments: readonly string[]; readonly conditional: boolean }
+  >;
+  readonly expanded: Set<t.ObjectExpression>;
+  unknown: number;
+  readonly objects: ReadonlyMap<number, ElectronApiObject>;
+}
+
+const boundObject = (
+  node: t.Node,
+  state: MemberState,
+): t.ObjectExpression | undefined => {
+  const expression = unwrapJavaScriptExpression(node).node;
+  if (t.isObjectExpression(expression)) return expression;
+  const bound = state.objects.get(expression.start ?? -1);
+  if (bound === undefined || !t.isIdentifier(expression)) return undefined;
+  if (bound.memberWrites) state.unknown += 1;
+  return bound.object;
 };
 
 const collectMembersAt = (
   object: t.ObjectExpression,
   prefix: readonly string[],
-  state: { members: string[]; unknown: number },
+  conditional: boolean,
+  state: MemberState,
 ): void => {
-  if (prefix.length >= 8) {
+  // Expand each source-owned object once per exposure. Cycles and repeated
+  // spreads stay explicitly unknown instead of amplifying a shared initializer.
+  if (prefix.length >= 8 || state.expanded.has(object)) {
     state.unknown += 1;
+    for (const [key, member] of state.members)
+      if (
+        member.segments.length > prefix.length + 1 &&
+        prefix.every((segment, index) => member.segments[index] === segment)
+      )
+        state.members.delete(key);
     return;
   }
+  state.expanded.add(object);
   for (const property of object.properties) {
     if (t.isSpreadElement(property)) {
-      state.unknown += 1;
+      collectSpread(property.argument, prefix, conditional, state);
       continue;
     }
     const name = semanticStaticPropertyKey(property.key, property.computed);
@@ -154,29 +233,75 @@ const collectMembersAt = (
       continue;
     }
     const segments = [...prefix, name];
-    const path = segments.join(".");
-    state.members.push(path);
-    if (t.isObjectProperty(property) && t.isObjectExpression(property.value))
-      collectMembersAt(property.value, segments, state);
+    for (const [key, member] of state.members)
+      if (
+        segments.every((segment, index) => member.segments[index] === segment)
+      )
+        state.members.delete(key);
+    state.members.set(compositeKey(segments), { segments, conditional });
+    const nested = t.isObjectProperty(property)
+      ? boundObject(property.value, state)
+      : undefined;
+    if (nested !== undefined)
+      collectMembersAt(nested, segments, conditional, state);
   }
 };
 
-const literalValue = (
-  node: t.Node | null | undefined,
-):
-  | { readonly found: true; readonly value: string | number | boolean | null }
-  | { readonly found: false } => {
-  if (node === null || node === undefined) return { found: false };
-  const literal = readExactJavaScriptLiteral(node);
-  if (literal.found) return literal;
-  if (
-    t.isUnaryExpression(node, { operator: "-" }) &&
-    t.isNumericLiteral(node.argument)
-  ) {
-    const value = -node.argument.value;
-    return Number.isFinite(value) && !Object.is(value, -0)
-      ? { found: true, value }
-      : { found: false };
+// A spread contributes exact keys only when every branch is a known object.
+const collectSpread = (
+  argument: t.Node,
+  prefix: readonly string[],
+  conditional: boolean,
+  state: MemberState,
+): void => {
+  const expression = unwrapJavaScriptExpression(argument).node;
+  const branches = t.isConditionalExpression(expression)
+    ? [expression.consequent, expression.alternate]
+    : t.isLogicalExpression(expression)
+      ? [expression.left, expression.right]
+      : [expression];
+  const objects = branches.map((branch) => boundObject(branch, state));
+  if (objects.some((object) => object === undefined)) {
+    state.unknown += 1;
+    // An unknown replacement can change nested shapes, while existing own
+    // top-level keys remain present after an object spread.
+    for (const [key, member] of state.members)
+      if (
+        member.segments.length > prefix.length + 1 &&
+        prefix.every((segment, index) => member.segments[index] === segment)
+      )
+        state.members.delete(key);
+    return;
   }
-  return { found: false };
+  if (branches.length === 1) {
+    const object = objects[0];
+    if (object !== undefined)
+      collectMembersAt(object, prefix, conditional, state);
+    return;
+  }
+  const alternatives: MemberState[] = [];
+  for (const object of objects) {
+    if (object === undefined) continue;
+    const branch: MemberState = {
+      ...state,
+      members: new Map(state.members),
+      unknown: 0,
+    };
+    collectMembersAt(object, prefix, conditional, branch);
+    alternatives.push(branch);
+    state.unknown += branch.unknown;
+  }
+  state.members.clear();
+  for (const branch of alternatives)
+    for (const [key, member] of branch.members)
+      state.members.set(key, {
+        segments: member.segments,
+        conditional:
+          member.conditional ||
+          alternatives.some(
+            (alternative) =>
+              !alternative.members.has(key) ||
+              alternative.members.get(key)?.conditional === true,
+          ),
+      });
 };

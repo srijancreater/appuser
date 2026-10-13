@@ -1,3 +1,4 @@
+import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
 import type { ElectronCallPath } from "../../domain/javascript/electronStaticAnalysisTypes.js";
 import type { JavaScriptArtifactFile } from "../../domain/javascript/javascriptArtifactFiles.js";
 import { sha256Text } from "../../domain/javascript/javascriptStaticAnalysisHelpers.js";
@@ -20,7 +21,16 @@ export function* projectElectronSemanticCallPaths(
     let previous: ReturnType<typeof retainSemanticGraphNode> = null;
     let previousKind: ElectronCallPath["steps"][number]["kind"] | undefined;
     for (const [index, step] of path.steps.entries()) {
-      const node = retainSemanticGraphNode(state, file, {
+      if (step.source_path !== undefined && step.source_sha256 === undefined)
+        throw new AnalysisOutputError(
+          "analyze_javascript_application",
+          "A linked Electron step has no source digest.",
+        );
+      const sourceFile =
+        step.source_path === undefined
+          ? file
+          : { path: step.source_path, sha256: step.source_sha256! };
+      const node = retainSemanticGraphNode(state, sourceFile, {
         kind:
           step.kind === "function"
             ? "function"
@@ -40,6 +50,9 @@ export function* projectElectronSemanticCallPaths(
           resolution: "candidate",
           conditions: path.conditions.map((c) => ({
             expression: c.expression,
+            ...(c.source_path === undefined
+              ? {}
+              : { source_path: c.source_path }),
             location: {
               start: { ...c.location.start },
               end: { ...c.location.end },
@@ -58,7 +71,7 @@ export function* projectElectronSemanticCallPaths(
               ? "aliases"
               : "calls",
         resolution: "candidate",
-        evidence: inferredSemanticEvidenceAt(file, step.location),
+        evidence: inferredSemanticEvidenceAt(sourceFile, step.location),
         properties: {
           path_id: pathId,
           entry: path.entry,

@@ -1,3 +1,8 @@
+import { parseContentSecurityPolicy } from "../../domain/javascript/contentSecurityPolicy.js";
+import {
+  electronStaticFindingCount,
+  type ElectronCallPath,
+} from "../../domain/javascript/electronStaticAnalysisTypes.js";
 import { createHash } from "node:crypto";
 
 import { moduleResolutionModeForJavaScriptReference } from "../../domain/javascript/javascriptModuleResolutionMode.js";
@@ -5,6 +10,8 @@ import { setImmediate } from "node:timers/promises";
 
 import { resolveJavaScriptSourceMapReferences } from "../../domain/javascript/javascriptSourceMapPaths.js";
 import { analyzeParsedJavaScriptStaticSourceSteps } from "../../domain/javascript/javascriptStaticAnalysis.js";
+import type { JavaScriptCompanionSource } from "../../domain/javascript/javascriptGlobalSymbolLinks.js";
+import { globalSymbolRegistryCompanions } from "../../domain/javascript/javascriptGlobalSymbolRegistry.js";
 import {
   analyzeParsedJavaScriptSemanticsSteps,
   classifyParsedJavaScriptOpenReceiversSteps,
@@ -32,6 +39,7 @@ import type {
   JavaScriptArtifactAnalysis,
   JavaScriptModuleArtifactAnalysis,
   JavaScriptModuleSemanticIr,
+  JavaScriptHtmlPolicyObservation,
   JavaScriptHtmlScriptObservation,
   JavaScriptJsonModuleObservation,
   JavaScriptPackageObservation,
@@ -58,7 +66,9 @@ interface MutableArtifactAnalysis<
   readonly packages: JavaScriptPackageObservation[];
   readonly jsonModules: JavaScriptJsonModuleObservation[];
   readonly htmlScripts: JavaScriptHtmlScriptObservation[];
+  readonly htmlPolicies: JavaScriptHtmlPolicyObservation[];
   readonly sourceMaps: JavaScriptSourceMapObservation[];
+  readonly companionLimitations: string[];
   visitedNodes: number;
   findings: number;
   modules: number;
@@ -72,8 +82,24 @@ interface ArtifactAnalysisContext<
   readonly projectSemantics: (
     file: JavaScriptArtifactFile,
     ir: JavaScriptSemanticIr,
+    paths: readonly ElectronCallPath[] | undefined,
   ) => Generator<void, SemanticIr>;
+  readonly companions?: ReadonlyMap<
+    string,
+    readonly JavaScriptCompanionSource[]
+  >;
 }
+
+/** Sources that name a global symbol registry key another source names. */
+const javascriptCompanionSources = (fileSet: JavaScriptArtifactFileSet) =>
+  globalSymbolRegistryCompanions(
+    fileSet.files.flatMap((file) =>
+      file.kind === "javascript" && file.text.included
+        ? [{ path: file.path, text: file.text.value }]
+        : [],
+    ),
+    fileSet.text_bytes_read,
+  );
 
 /** Analyze every text source from the artifact without a result quota. */
 export const analyzeJavaScriptArtifactFiles = (
@@ -95,6 +121,7 @@ export const analyzeAndProjectJavaScriptArtifactFiles = async (
   projectSemantics: (
     file: JavaScriptArtifactFile,
     ir: JavaScriptSemanticIr,
+    paths: readonly ElectronCallPath[] | undefined,
   ) => Iterator<void, void> | void,
   beforeFile?: (
     file: JavaScriptArtifactFile,
@@ -107,12 +134,19 @@ export const analyzeAndProjectJavaScriptArtifactFiles = async (
   const projectFileSemantics = function* (
     file: JavaScriptArtifactFile,
     ir: JavaScriptSemanticIr,
+    paths: readonly ElectronCallPath[] | undefined,
   ): Generator<void, JavaScriptModuleSemanticIr> {
-    const projection = projectSemantics(file, ir);
+    const projection = projectSemantics(file, ir, paths);
     if (projection !== undefined) while (projection.next().done !== true) yield;
     return projectJavaScriptModuleSemantics(ir);
   };
-  const context = { state, projectSemantics: projectFileSemantics };
+  const linking = javascriptCompanionSources(fileSet);
+  state.companionLimitations.push(...linking.limitations);
+  const context = {
+    state,
+    projectSemantics: projectFileSemantics,
+    companions: linking.companions,
+  };
   for (const [index, file] of fileSet.files.entries()) {
     // Let progress, cancellation and garbage collection run between files.
     await setImmediate();
@@ -141,6 +175,9 @@ export const analyzeAndAdoptJavaScriptArtifactFiles = async (
   readonly interruption: AnalysisError | null;
 }> => {
   const state = emptyArtifactAnalysis<JavaScriptModuleSemanticIr>();
+  const linking = javascriptCompanionSources(fileSet);
+  const companions = linking.companions;
+  state.companionLimitations.push(...linking.limitations);
   let interruption: AnalysisError | null = null;
   const selectedFileCount =
     fileSet.files.length - (fileSet.source_selection?.unselected_files ?? 0);
@@ -175,11 +212,12 @@ export const analyzeAndAdoptJavaScriptArtifactFiles = async (
         file,
         projection.remainingFileNodeBudget(),
         signal,
+        companions.get(file.path),
       );
       const facts = result.ok ? result.value : result.error;
       const applicationProjectionFailure = facts.applicationProjectionFailure;
       if (facts.projection !== null)
-        projection.adoptFileProjection(facts.projection);
+        projection.adoptFileProjection(file, facts.projection);
       const error = result.ok ? null : result.error.error;
       const limits =
         error instanceof AnalysisResourceConstraintError
@@ -311,7 +349,13 @@ const analyzeArtifactFiles = <SemanticIr extends JavaScriptModuleSemanticIr>(
   projectSemantics: ArtifactAnalysisContext<SemanticIr>["projectSemantics"],
 ): JavaScriptArtifactAnalysis<SemanticIr> => {
   const state = emptyArtifactAnalysis<SemanticIr>();
-  const context = { state, projectSemantics };
+  const linking = javascriptCompanionSources(fileSet);
+  state.companionLimitations.push(...linking.limitations);
+  const context = {
+    state,
+    projectSemantics,
+    companions: linking.companions,
+  };
   for (const file of fileSet.files) {
     const steps = analyzeArtifactFileSteps(file, context);
     while (steps.next().done !== true);
@@ -329,12 +373,15 @@ const finalizeArtifactAnalysis = <
     packages: state.packages,
     json_modules: state.jsonModules,
     html_scripts: state.htmlScripts,
+    html_policies: state.htmlPolicies,
     source_maps: state.sourceMaps,
     visited_ast_nodes: state.visitedNodes,
-    findings: state.findings + state.htmlScripts.length,
+    findings:
+      state.findings + state.htmlScripts.length + state.htmlPolicies.length,
     modules: state.modules,
     parse_failures: state.parseFailures,
     limitations: [
+      ...state.companionLimitations,
       "JavaScript and HTML were parsed as inert text; bundle bootstrap code was never executed.",
       "Static paths and relationships may remain unresolved when expressions are dynamic or obfuscated.",
       ...state.files.flatMap(
@@ -342,6 +389,15 @@ const finalizeArtifactAnalysis = <
           [analysis_failure, application_projection_failure].flatMap(
             (failure) => (failure === undefined ? [] : [failure.reason]),
           ),
+      ),
+      ...state.files.flatMap(({ file, javascript }) =>
+        javascript === null ||
+        javascript.parse_status === "failed" ||
+        javascript.constant_folding.status === "available"
+          ? []
+          : [
+              `${file.path}: Constant folding was unavailable (${javascript.constant_folding.reason}); only literal syntax supplied static values.`,
+            ],
       ),
     ],
   };
@@ -357,7 +413,7 @@ function* analyzeArtifactFileSteps<
   if (classifyOutsideAnalysisScope(file, state)) return;
   addStructuredObservations(file, state);
   if (file.kind === "html" && file.text.included)
-    state.htmlScripts.push(...parseHtmlScripts(file.path, file.text.value));
+    addHtmlReferences(file.path, file.text.value, state);
   if (file.kind === "source-map") addSourceMap(file, context);
   if (file.kind !== "javascript" || !file.text.included) {
     state.files.push({ file, javascript: null, semantic: null });
@@ -377,6 +433,7 @@ function* analyzeArtifactFileSteps<
     file.text.value,
     parsed,
     openReceiverFacts,
+    context.companions?.get(file.path),
   );
   const staticFindings = findingCount(analysis);
   yield;
@@ -393,7 +450,11 @@ function* analyzeArtifactFileSteps<
   const projected =
     semantics === null
       ? null
-      : yield* context.projectSemantics(file, semantics);
+      : yield* context.projectSemantics(
+          file,
+          semantics,
+          analysis.electron.call_paths,
+        );
   state.files.push({
     file,
     javascript: analysis,
@@ -443,7 +504,9 @@ const emptyArtifactAnalysis = <
   packages: [],
   jsonModules: [],
   htmlScripts: [],
+  htmlPolicies: [],
   sourceMaps: [],
+  companionLimitations: [],
   visitedNodes: 0,
   findings: 0,
   modules: 0,
@@ -512,17 +575,39 @@ const unavailablePackage = (
   limitation,
 });
 
-const parseHtmlScripts = (
+const addHtmlReferences = (
   path: string,
   text: string,
-): JavaScriptHtmlScriptObservation[] => {
-  const { scripts, baseHref } = htmlArtifactReferences(text);
-  return scripts.map(({ scriptPath, startOffset, endOffset }) => ({
-    html_path: path,
-    script_path: scriptPath,
-    base_href: baseHref,
-    location: rangeForOffsets(text, startOffset, endOffset),
-  }));
+  state: Pick<
+    MutableArtifactAnalysis<JavaScriptModuleSemanticIr>,
+    "htmlScripts" | "htmlPolicies"
+  >,
+): void => {
+  const { scripts, policies, baseHref } = htmlArtifactReferences(text);
+  for (const { scriptPath, startOffset, endOffset } of scripts)
+    state.htmlScripts.push({
+      html_path: path,
+      script_path: scriptPath,
+      base_href: baseHref,
+      location: rangeForOffsets(text, startOffset, endOffset),
+    });
+  for (const { header, content, startOffset, endOffset } of policies) {
+    const parsed = parseContentSecurityPolicy(content, false);
+    state.htmlPolicies.push({
+      html_path: path,
+      policy: {
+        mechanism: "html-meta",
+        header,
+        policy: content,
+        policy_expression: null,
+        directives: parsed?.directives ?? [],
+        concerns: parsed?.concerns ?? [],
+        dynamic_parts: 0,
+        module_key: null,
+        location: rangeForOffsets(text, startOffset, endOffset),
+      },
+    });
+  }
 };
 
 const parseSourceMap = (
@@ -631,12 +716,7 @@ const findingCount = (analysis: JavaScriptStaticAnalysis): number =>
   analysis.role_paths.length +
   analysis.source_map_urls.length +
   analysis.bundler_registrations.length +
-  analysis.electron.browser_windows.length +
-  analysis.electron.context_bridge_apis.length +
-  analysis.electron.ipc.length +
-  analysis.electron.sender_validations.length +
-  analysis.electron.utility_processes.length +
-  analysis.electron.native_addon_bindings.length;
+  electronStaticFindingCount(analysis.electron);
 
 const rangeForOffsets = (
   text: string,

@@ -44,6 +44,8 @@ const captures = {
 };
 const summary = {
   browser_windows: 0,
+  web_contents_views: 0,
+  webview_attach_handlers: 0,
   explicit_web_preferences: 0,
   preload_entrypoints: 0,
   context_bridge_apis: 0,
@@ -56,6 +58,7 @@ const summary = {
     renderer_listeners: 0,
     main_handlers: 0,
     paired_renderer_transmissions: 0,
+    guarded_renderer_transmissions: 0,
     ambiguous_renderer_transmissions: 0,
     unpaired_literal_renderer_transmissions: 0,
   },
@@ -64,6 +67,9 @@ const summary = {
   resolved_utility_entrypoints: 0,
   native_addon_bindings: 0,
   resolved_native_addon_bindings: 0,
+  inferred_api_identity_findings: 0,
+  content_security_policies: 0,
+  content_security_policy_concerns: 0,
 };
 const statistics = {
   relevant_files: 1,
@@ -229,8 +235,10 @@ const exampleEvidence = (property: "count" | "total") => {
         status: "unknown",
         retained_relations: 0,
         omitted_relations: null,
-        unknown_ids: [],
+        retained_unknowns: 0,
+        omitted_unknowns: null,
       })),
+      files: [],
     },
     limitations,
   });

@@ -384,7 +384,18 @@ it("preserves conditions when a wrapper dispatches through conditional external 
       ({ resolution_basis, channel }) =>
         resolution_basis === "wrapper-substitution" && channel === "channel",
     ),
-  ).toEqual([]);
+  ).toEqual([
+    expect.objectContaining({
+      operation: "send",
+      guard_alternatives: [[expect.objectContaining({ expression: "flag" })]],
+    }),
+    expect.objectContaining({
+      operation: "invoke",
+      guard_alternatives: [
+        [expect.objectContaining({ expression: "!(flag)" })],
+      ],
+    }),
+  ]);
   expect(result.parse_status).toBe("partial");
 });
 it("keeps conditional IPC channels unknown instead of reporting them unconditionally", () => {
@@ -396,7 +407,7 @@ it("keeps conditional IPC channels unknown instead of reporting them uncondition
   expect(result.electron.call_paths ?? []).toEqual([]);
   expect(result.parse_status).toBe("partial");
 });
-it("retains enclosing branch predicates without emitting unconditional wrapper findings", () => {
+it("retains enclosing branch predicates on guarded wrapper findings", () => {
   const result = analyzeJavaScriptStaticSource(`
     const e=require("electron");
     function expose(key,api){e.contextBridge.exposeInMainWorld(key,api);}
@@ -412,10 +423,11 @@ it("retains enclosing branch predicates without emitting unconditional wrapper f
       resolution_basis: "wrapper-substitution",
     }),
   );
-  expect(result.electron.ipc).not.toContainEqual(
+  expect(result.electron.ipc).toContainEqual(
     expect.objectContaining({
       channel: "only:flag",
       resolution_basis: "wrapper-substitution",
+      guard_alternatives: [[expect.objectContaining({ expression: "flag" })]],
     }),
   );
   for (const entry of ["conditional.copy", "only:flag"])
@@ -633,6 +645,201 @@ describe("wrapped Electron API identity", () => {
     `);
     expect(electron.ipc).toContainEqual(
       expect.objectContaining({ channel: "good", operation: "invoke" }),
+    );
+  });
+});
+
+describe("generated IPC channel families", () => {
+  const edge = `
+    function channelOf(edge,method){return \`edge:\${edge}:m:\${method}\`}
+    function declare(edge,methods){return Object.freeze({edge,methods})}
+    const declared=declare("main",{open:{schema:null},close:{schema:null}});`;
+  it("substitutes each method of an exact declaration into a computed channel", () => {
+    const { electron } = analyzeJavaScriptStaticSource(`
+      const e=require("electron");${edge}
+      function serve(declaration,transport){
+        for(const [method] of Object.entries(declaration.methods))
+          transport.handle(channelOf(declaration.edge,method),event=>event.sender.copy());
+      }
+      serve(declared,{handle:(channel,handler)=>e.ipcMain.handle(channel,handler)});
+    `);
+    expect(
+      electron.ipc
+        .filter(
+          ({ resolution_basis }) => resolution_basis === "wrapper-substitution",
+        )
+        .map(({ channel, guard_alternatives }) => ({
+          channel,
+          guard_alternatives,
+        })),
+    ).toEqual([
+      { channel: "edge:main:m:open", guard_alternatives: undefined },
+      { channel: "edge:main:m:close", guard_alternatives: undefined },
+    ]);
+  });
+  it("traces client methods written per declared method in a loop", () => {
+    const { electron } = analyzeJavaScriptStaticSource(`
+      const e=require("electron");${edge}
+      function client(declaration,options={}){
+        const api={},measures=options.measures??null;
+        const call=method=>measures==null
+          ? e.ipcRenderer.invoke(channelOf(declaration.edge,method))
+          : e.ipcRenderer.invoke(channelOf(declaration.edge,method)).then(v=>v);
+        for(const [method] of Object.entries(declaration.methods)) api[method]=()=>call(method);
+        return api;
+      }
+      e.contextBridge.exposeInMainWorld("desktop",client(declared));
+    `);
+    expect(
+      electron.ipc
+        .filter(({ channel }) => channel?.startsWith("edge:"))
+        .map(({ channel, guard_alternatives }) => ({
+          channel,
+          guard_alternatives,
+        })),
+    ).toEqual(
+      expect.arrayContaining([
+        { channel: "edge:main:m:open", guard_alternatives: undefined },
+        { channel: "edge:main:m:close", guard_alternatives: undefined },
+      ]),
+    );
+    expect(electron.context_bridge_apis).toContainEqual(
+      expect.objectContaining({
+        api_key: "desktop",
+        members: ["close", "open"],
+      }),
+    );
+  });
+  it("keeps a predicate reached only on one branch of a promise gate", () => {
+    const { electron } = analyzeJavaScriptStaticSource(`
+      const e=require("electron");
+      const ready=state==="served"?Promise.resolve():new Promise(done=>wait(done));
+      const invoke=channel=>ready.then(()=>e.ipcRenderer.invoke(channel));
+      e.contextBridge.exposeInMainWorld("desktop",{open:()=>invoke("edge:main:m:open")});
+    `);
+    expect(electron.ipc).toContainEqual(
+      expect.objectContaining({
+        channel: "edge:main:m:open",
+        guard_alternatives: [
+          [expect.objectContaining({ expression: 'state==="served"' })],
+          [
+            expect.objectContaining({ expression: '!(state==="served")' }),
+            expect.objectContaining({
+              expression: "(new Promise(done=>wait(done))) is fulfilled",
+            }),
+          ],
+        ],
+      }),
+    );
+  });
+  it("follows a registry slot another source publishes and locates the linked call", () => {
+    const core = `
+      const electron=require("electron");
+      function transport(options){const ipc=options.ipcMain??electron.ipcMain;return {handle:(channel,handler)=>ipc.handle(channel,handler)}}
+      globalThis[Symbol.for("demo.modules")]=Object.freeze([{get transport(){return transport}}]);`;
+    const source = `
+      const modules=globalThis[Symbol.for("demo.modules")];
+      function serve(channel,handler,transport){transport.handle(channel,handler)}
+      function start(options){serve("linked:ping",event=>event.sender.copy(),modules[0].transport(options))}
+      start({});`;
+    const unlinked = analyzeJavaScriptStaticSource(source);
+    expect(unlinked.electron.ipc).toEqual([]);
+    const { electron, limitations } = analyzeJavaScriptStaticSource(source, [
+      { path: "core.js", text: core },
+    ]);
+    expect(electron.ipc).toEqual([
+      expect.objectContaining({
+        channel: "linked:ping",
+        resolution_basis: "wrapper-substitution",
+        linked_operation: expect.objectContaining({ source_path: "core.js" }),
+      }),
+    ]);
+    expect(electron.ipc[0]).not.toHaveProperty("guard_alternatives");
+    expect(electron.call_paths).toContainEqual(
+      expect.objectContaining({
+        entry: "linked:ping",
+        terminal: "ipc-event.sender.copy",
+      }),
+    );
+    expect(limitations).toContainEqual(
+      expect.stringContaining("global symbol registry"),
+    );
+  });
+  it("leaves a registry slot published by several sources unlinked", () => {
+    const core = `globalThis[Symbol.for("demo.modules")]={send:channel=>require("electron").ipcRenderer.send(channel)};`;
+    const { electron } = analyzeJavaScriptStaticSource(
+      `function send(channel,api){api.send(channel)}send(\`a:\${"b"}\`,globalThis[Symbol.for("demo.modules")]);`,
+      [
+        { path: "one.js", text: core },
+        { path: "two.js", text: core },
+      ],
+    );
+    expect(electron.ipc).toEqual([]);
+  });
+});
+
+describe("substituted wrapper values", () => {
+  it("folds channels built from substituted arguments with the constant operators", () => {
+    const result = analyzeJavaScriptStaticSource(`
+      const e=require("electron");
+      function send(name){e.ipcRenderer.send("app:"+name)}
+      function invoke(kind){return e.ipcRenderer.invoke(\`app:\${kind}:\${["a",void kind].join("-")}\`)}
+      e.contextBridge.exposeInMainWorld("desktop",{copy:()=>send("copy"),paste:()=>invoke("paste")});
+    `);
+    expect(
+      result.electron.call_paths?.map(({ entry, channel }) => [entry, channel]),
+    ).toEqual(
+      expect.arrayContaining([
+        ["desktop.copy", "app:copy"],
+        ["desktop.paste", "app:paste:a-"],
+      ]),
+    );
+  });
+  it("traces a handler registered through an inferred wrapper parameter", () => {
+    const result = analyzeJavaScriptStaticSource(`
+      const electron=require("electron");
+      function setup(ipc){
+        function register(channel){ipc.handle(channel,event=>event.sender.copy())}
+        register("wrapped:copy");
+      }
+      setup(electron.ipcMain);
+    `);
+    expect(result.electron.call_paths).toContainEqual(
+      expect.objectContaining({
+        entry_kind: "ipc-handler",
+        channel: "wrapped:copy",
+        terminal: "ipc-event.sender.copy",
+      }),
+    );
+    expect(result.electron.ipc).toContainEqual(
+      expect.objectContaining({
+        channel: "wrapped:copy",
+        resolution_basis: "wrapper-substitution",
+        electron_identity: expect.objectContaining({
+          basis: "wrapper-parameter",
+          function_name: "setup",
+          parameter: "ipc",
+        }),
+      }),
+    );
+  });
+  it("does not read array elements for a non-index member", () => {
+    const { parse_status } = analyzeJavaScriptStaticSource(`
+      const vu={T:{toString(n){return[vu.S.toString(n)].join(" ")}},S:{toString(){return""}}};
+    `);
+    expect(parse_status).toBe("complete");
+  });
+  it("traces handlers registered through an Electron import", () => {
+    const result = analyzeJavaScriptStaticSource(`
+      import { ipcMain } from "electron";
+      ipcMain.on("imported:copy", event => event.sender.copy());
+    `);
+    expect(result.electron.call_paths).toContainEqual(
+      expect.objectContaining({
+        entry_kind: "ipc-handler",
+        channel: "imported:copy",
+        terminal: "ipc-event.sender.copy",
+      }),
     );
   });
 });

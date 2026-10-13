@@ -23,7 +23,7 @@ export const electronExportPath = (
 
 /** Static identity recovery cannot establish the absence of Electron usage. */
 export const ELECTRON_IDENTITY_LIMITATION =
-  "Electron API identity follows proven lexical module aliases and structurally verified module-namespace interop. Other reassignments, dynamic selections, and visibly overwritten namespace members are unresolved; missing findings do not establish absence. Arbitrary call side effects and runtime registration are not evaluated.";
+  "Electron API identity follows proven lexical module aliases and structurally verified module-namespace interop. Identity through one wrapper parameter is inferred from same-file direct call sites. Other reassignments, dynamic selections, and visibly overwritten namespace members are unresolved; missing findings do not establish absence. Arbitrary call side effects and runtime registration are not evaluated.";
 
 /** Preserve exact property segments instead of flattening literal dotted keys. */
 export const electronMemberPath = (

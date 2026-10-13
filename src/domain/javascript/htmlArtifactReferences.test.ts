@@ -48,7 +48,21 @@ it("retains exact opening-tag offsets rather than the script body", () => {
         endOffset: prefix.length + opening.length,
       },
     ],
+    policies: [],
   });
+});
+
+it("extracts policy meta elements by http-equiv, not by markup inside text", () => {
+  const meta = `<meta HTTP-EQUIV="Content-Security-Policy" content="default-src 'self'">`;
+  const text = `${meta}<meta http-equiv="refresh" content="1"><textarea><meta http-equiv="content-security-policy" content="x"></textarea>`;
+  expect(htmlArtifactReferences(text).policies).toEqual([
+    {
+      header: "content-security-policy",
+      content: "default-src 'self'",
+      startOffset: 0,
+      endOffset: meta.length,
+    },
+  ]);
 });
 
 it.each([

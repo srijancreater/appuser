@@ -48,6 +48,45 @@ const COPY_PROPS = parseExpression(`(to, from, except, desc) => {
     }
   return to;
 }`);
+// esbuild's __toESM and __copyProps, in source and minified spelling.
+const ESBUILD_TO_ESM = [
+  parseExpression(`(mod, isNodeMode, target) => (
+    target = mod != null ? __create(__getProtoOf(mod)) : {},
+    __copyProps(isNodeMode || !mod || !mod.__esModule
+      ? __defProp(target, "default", {value: mod, enumerable: true}) : target, mod)
+  )`),
+  parseExpression(`(mod, isNodeMode, target) => (
+    target = mod != null ? __create(__getProtoOf(mod)) : {},
+    __copyProps(isNodeMode || !mod || !mod.__esModule
+      ? __defProp(target, "default", {value: mod, enumerable: !0}) : target, mod)
+  )`),
+];
+const ESBUILD_COPY_PROPS = [
+  parseExpression(`(to, from, except, desc) => {
+    if (from && typeof from === "object" || typeof from === "function") {
+      for (let key of __getOwnPropNames(from))
+        if (!__hasOwnProp.call(to, key) && key !== except)
+          __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+    }
+    return to;
+  }`),
+  parseExpression(`(to, from, except, desc) => {
+    if (from && typeof from == "object" || typeof from == "function")
+      for (let key of __getOwnPropNames(from))
+        !__hasOwnProp.call(to, key) && key !== except && __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+    return to;
+  }`),
+];
+// esbuild's lazy __commonJS wrapper over one factory function, or over an
+// object holding one factory as in unminified output.
+const ESBUILD_COMMONJS = [
+  parseExpression(
+    `(cb, mod) => () => (mod || cb((mod = {exports: {}}).exports, mod), mod.exports)`,
+  ),
+  parseExpression(`(cb, mod) => function __require() {
+    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = {exports: {}}).exports, mod), mod.exports;
+  }`),
+];
 const INTRINSICS: Readonly<Record<string, readonly string[]>> = {
   __create: ["Object", "create"],
   __getProtoOf: ["Object", "getPrototypeOf"],
@@ -398,11 +437,17 @@ export const createSemanticModuleInterop = (
       helpers.set(binding.bindingId, proof);
       return proof;
     }
-    const wrapperRoles = canonicalRoles(wrapper, TO_ESM, state);
+    const wrapperRoles = firstRoles(
+      wrapper,
+      [TO_ESM, ...ESBUILD_TO_ESM],
+      state,
+    );
     const copyBinding = wrapperRoles?.get("__copyProps");
     const copy = unprojectedInitializer(copyBinding, state);
     const copyRoles =
-      copy === undefined ? undefined : canonicalRoles(copy, COPY_PROPS, state);
+      copy === undefined
+        ? undefined
+        : firstRoles(copy, [COPY_PROPS, ...ESBUILD_COPY_PROPS], state);
     if (
       wrapperRoles === undefined ||
       copyRoles === undefined ||
@@ -613,9 +658,55 @@ export const createSemanticModuleInterop = (
           write.coverage.covers(path),
       );
     }) ?? false;
+  /** The factory of a call to a program-scope esbuild `__commonJS` wrapper. */
+  const commonJsFactory = (node: t.Node): t.Function | undefined => {
+    if (!t.isCallExpression(node) || !t.isIdentifier(node.callee))
+      return undefined;
+    const helper = resolveSemanticBindingState(
+      state,
+      node.callee,
+      node.callee.name,
+    );
+    const wrapper = unprojectedInitializer(helper, state);
+    if (
+      helper === undefined ||
+      wrapper === undefined ||
+      state.scopesById.get(helper.scopeId)?.kind !== "program" ||
+      (!t.isFunctionDeclaration(wrapper) &&
+        (wrapper.end ?? Infinity) >= (node.start ?? -1))
+    )
+      return undefined;
+    const roles = firstRoles(wrapper, ESBUILD_COMMONJS, state);
+    const [factory] = node.arguments;
+    if (roles === undefined || node.arguments.length !== 1) return undefined;
+    if (roles.has("__getOwnPropNames")) {
+      if (!t.isObjectExpression(factory) || factory.properties.length !== 1)
+        return undefined;
+      const [property] = factory.properties;
+      const value = t.isObjectMethod(property)
+        ? property
+        : t.isObjectProperty(property)
+          ? property.value
+          : undefined;
+      const names = unprojectedInitializer(
+        roles.get("__getOwnPropNames"),
+        state,
+      );
+      return t.isFunction(value) &&
+        names !== undefined &&
+        capturedIntrinsic(names)?.path.join(".") ===
+          "intrinsic.Object.getOwnPropertyNames"
+        ? value
+        : undefined;
+    }
+    return t.isFunction(factory) ? factory : undefined;
+  };
   return {
     origin,
     callOrigin,
+    commonJsFactory,
+    /** A proven namespace conversion call, with its converted input. */
+    namespaceConversion: provenCall,
     intrinsicPath,
     intrinsicInvocation: (node: t.CallExpression | t.OptionalCallExpression) =>
       resolveJavaScriptIntrinsicInvocation(
@@ -687,6 +778,18 @@ const unprojectedInitializer = (
 ): t.Node | undefined => {
   const initializer = semanticStableInitializer(binding, state);
   return initializer?.projection.length === 0 ? initializer.node : undefined;
+};
+
+const firstRoles = (
+  actual: t.Node,
+  patterns: readonly t.Node[],
+  state: JavaScriptSemanticAnalysisState,
+): ReadonlyMap<string, JavaScriptSemanticBindingState> | undefined => {
+  for (const pattern of patterns) {
+    const roles = canonicalRoles(actual, pattern, state);
+    if (roles !== undefined) return roles;
+  }
+  return undefined;
 };
 
 /** Match operations and lexical roles, allowing single-statement control blocks. */

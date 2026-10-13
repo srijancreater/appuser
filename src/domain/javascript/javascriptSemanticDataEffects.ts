@@ -25,7 +25,6 @@ import {
   dataEffectLiteralString as literalString,
   dataEffectMemberCallee as memberCallee,
   dataEffectMemberObject as memberObject,
-  dataEffectPrimitive as primitiveValue,
   isSemanticProcessObject as isProcessObject,
   outerDataEffectBinding as outerAssignedBinding,
   assignedSemanticResultBindings,
@@ -34,6 +33,7 @@ import {
   type DataEffectTraversalContext as TraversalContext,
 } from "./javascriptSemanticDataEffectHelpers.js";
 import { range } from "./javascriptStaticAnalysisHelpers.js";
+import { evaluateSemanticExpression } from "./javascriptSemanticValues.js";
 
 interface DataEffectAnalysis {
   readonly configurationOperations: readonly JavaScriptSemanticConfigurationOperation[];
@@ -190,8 +190,7 @@ const collectDefaults = (
       resultBindingId: outerAssignedBinding(node, context),
       key: candidate.operation.key,
       sourceConfigId: candidate.operation.configId,
-      value: primitiveValue(node.right),
-      resolution: primitiveValue(node.right) === null ? "partial" : "complete",
+      ...exactDefault(node.right, context.state),
     });
   });
   return output;
@@ -211,7 +210,7 @@ const collectRequests = (
       return;
     const method = requestMethod(node, context.state);
     if (method === null) return;
-    const endpoint = requestEndpoint(node);
+    const endpoint = requestEndpoint(node, context.state);
     output.push({
       node,
       operation: {
@@ -433,7 +432,24 @@ const requestFields = (
 
 const requestEndpoint = (
   node: t.CallExpression | t.OptionalCallExpression | t.NewExpression,
-): string | null =>
-  t.isObjectExpression(node.arguments[0])
-    ? null
-    : literalString(node.arguments[0]);
+  state: JavaScriptSemanticAnalysisState,
+): string | null => {
+  const argument = node.arguments[0];
+  if (argument === undefined || t.isObjectExpression(argument)) return null;
+  const literal = literalString(argument);
+  if (literal !== null || !t.isExpression(argument)) return literal;
+  const value = evaluateSemanticExpression(argument, state);
+  return value.status === "literal" && typeof value.value === "string"
+    ? value.value
+    : null;
+};
+
+const exactDefault = (
+  node: t.Expression,
+  state: JavaScriptSemanticAnalysisState,
+): Pick<JavaScriptSemanticConfigurationOperation, "value" | "resolution"> => {
+  const value = evaluateSemanticExpression(node, state);
+  return value.status === "literal"
+    ? { value: value.value, resolution: "complete" }
+    : { value: null, resolution: "partial" };
+};

@@ -224,16 +224,76 @@ Selected bounded text is then parsed as inert data to recover:
 - route, network endpoint, storage, and vendor-marker observations;
 - local source-map declarations and original
   source names and content digests;
-- explicit BrowserWindow options and `webPreferences`, including statically
-  resolvable preload entrypoints;
+- explicit `BrowserWindow`, `BrowserView`, and `WebContentsView` options and
+  `webPreferences`, including statically resolvable preload entrypoints. The
+  finding's `api` names the constructor; views become `web-contents-view`
+  graph nodes;
+- `will-attach-webview` listeners (`on`, `once`, `addListener`,
+  `prependListener`) with an inline handler: writes and deletions through its
+  `webPreferences` and `params` parameters, in source order, and the last
+  statically resolvable preload path. The listener is recognized by its event
+  name; the receiver is not proven to be a webContents, and branches are not
+  evaluated;
 - `contextBridge.exposeInMainWorld` and `exposeInIsolatedWorld` API keys and
-  bounded literal member paths;
+  bounded member paths of a literal API object or of an identifier bound to one
+  stable object-literal initializer (`api_status: object-binding`). Member
+  values that are such identifiers are followed. Keys from a conditional
+  object spread whose branches are known objects are listed separately as
+  `conditional_members`. A visible member write to a bound object adds one
+  unknown member, because its added keys are not enumerated;
 - renderer and main-process IPC operations, literal or dynamic channels, exact
   handler locations, and conservative pairing status;
 - sender, frame, URL, and origin validation candidates without claiming that a
   visible check enforces a complete policy;
+- Content-Security-Policy text from `<meta http-equiv>` elements in HTML
+  files, from JavaScript properties or assignments named
+  `Content-Security-Policy` or `Content-Security-Policy-Report-Only` (such as
+  `responseHeaders` in a `webRequest.onHeadersReceived` handler), from
+  `[...].join(separator)` directive lists, and from string or template literals
+  with at least two directives, including `<meta>` markup inside them. Each
+  policy reports its directives and `concerns`: wildcard and network-scheme
+  sources, `data:` or `blob:` script sources, `'unsafe-inline'` (scripts only
+  without a nonce or hash), `'unsafe-eval'`, and a missing script or plugin
+  fallback. Runtime parts appear as `${…}`; directives containing them are not
+  judged, and omissions are judged only for fully static policies. Where a
+  policy is declared does not prove which documents it applies to;
 - utility-process entrypoints and native `.node` binding requests without
-  parsing or executing the add-on.
+  parsing or executing the add-on. Loader calls are included: a function from
+  `module.createRequire`, the `bindings` and `node-gyp-build` packages, and
+  `process.dlopen`, reached directly, through one stable alias
+  (`loader_basis: alias`), or through a parameter default value
+  (`parameter-default`). A `createRequire` call with a non-`.node` specifier is
+  a `require` reference. `bindings` and `node-gyp-build` choose their add-on at
+  runtime, so the candidates are the `.node` files in `build/Release`,
+  `build/Debug`, and `prebuilds/*` of the nearest inventoried package root
+  (`resolution_basis: loader-package-root`); exactly one candidate resolves the
+  binding with low confidence. Members read from a loader result are not
+  followed.
+
+Electron option values, IPC channels, contextBridge keys, sender checks, and
+network endpoint arguments are read through the semantic value lattice.
+Literal syntax reports `literal`. A value folded from constant operators
+(`!0`, `void`, `typeof`, arithmetic, comparison, `+`, templates,
+`[...].join(sep)`, `String.fromCharCode(...)`) or read through a binding with a
+single initializer reports the exact value with its source expression: status
+`derived` for Electron values, and both the value and its `*_expression` for
+channels, keys, and endpoints. IPC pairing treats derived channels as exact and
+marks the pairing basis `unique-exact-derived-channel`. Only JSON primitives
+become values: `void 0` and `1/0` alone stay dynamic, though they fold as
+operands. Folding assumes the unmodified `String.fromCharCode` and
+`Array.prototype.join` built-ins. If member-write recovery for a file exceeds a
+resource limit, that file reports literal values only and records the reason.
+
+URL-like strings in data are reported as `data` endpoints alongside `route`
+and `network` endpoints, which are consumed at a recognized route or call site.
+Data endpoints come from string literals and object keys, template text, and
+maximal folded expressions. Each endpoint carries `url_class` (`http`,
+`websocket`, `host`, `path`, `data`, `blob`, or `file`), `host`, and, for data
+values, `property_path` from the nearest named container, such as
+`["Voice", "DIALABLE_ORIGIN"]` or `["PROVIDERS", "Map()", "0", "0", "0"]`.
+Host-only values must be lowercase DNS names under a two-letter IANA country
+code or a common generic top-level domain; this classification is syntactic,
+so dotted identifiers can still match.
 
 Overloaded `.open` calls use lexical receiver facts: ambient browser window and
 document receivers are treated as browsing-context or document operations,
@@ -311,6 +371,16 @@ paths retain source ranges, module identities, literal channels and branch
 conditions as static candidates. Unknown spreads, reassigned bindings, accessors,
 dynamic channels and unsupported syntax do not become exact implementations.
 This pass neither executes the bundle nor proves that runtime guards pass.
+Substituted channels and bridge keys fold through the same constant operators
+as static values: concatenation and other primitive operators, templates,
+`String.fromCharCode` and `Array.prototype.join`. An operand known only to be
+an object compares exactly under strict equality with a primitive and loose
+equality with `null` or `undefined`; other operators on it stay unresolved. An
+operand whose alternatives carry branch conditions is folded once per
+alternative, and each folded value keeps the conditions of the alternatives it
+came from. Electron API identity comes from the shared identity index, so an
+import keeps its module binding and an unbound wrapper parameter uses the
+inference described below, recorded in the finding's `electron_identity`.
 An ambiguous or unresolved handler retains its channel registration but does
 not acquire a path to one arbitrarily selected callback. Unknown factory
 conditions retain both return branches, including fallthrough. Short-circuit
@@ -321,9 +391,47 @@ These paths appear as contextual `javascript-expression` nodes. An exact `api`
 seed such as `desktop.copy` can trace an exposed member through a unique IPC
 pairing to an external API call. `addListener` is normalized to `on`. Semantic
 projection retains these boundary paths before bulk function definitions, within
-the existing per-file node budget; omitted general semantics remain explicitly
+the per-file semantic budget; omitted general semantics remain explicitly
 partial. Wrapper expansion is bounded by one million visits/substitutions and
 128 nested substitutions, with exhaustion reported as unknown coverage.
+
+Wrapper substitution also starts from the outermost same-file call sites of
+wrappers whose parameter receives an IPC-named call (`handle`, `on`, `invoke`,
+`send`, and similar) with a computed channel. A call site that passes such a
+parameter on, or whose arguments read its enclosing named wrapper's
+parameters, is followed to that wrapper's direct call sites, at most eight
+levels deep; an escaping wrapper keeps the inner call as the start. Templates
+and string concatenation fold through the value lattice, so generated channel
+families such as `dune-rpc:${edge}:m:${method}` become exact channels when the
+edge and method names are static. `for...of` loops substitute each element of
+an exact array, including `Object.entries`, `keys`, and `values` of exact
+objects and `Array.prototype.map` results. A fresh local object written per
+iterated key, or by direct and short-circuit statements that complete before
+it is read, keeps those members; other writes leave it unresolved. Getters of
+object literals are evaluated, and an absent key of a closed literal reads
+`undefined` unless it names an `Object.prototype` member. esbuild `__commonJS`
+wrappers and `__toESM` conversions, in source or minified spelling, are
+recognized structurally. Promise fulfillment callbacks run for
+`Promise.resolve()` values and, under an `is fulfilled` predicate, for
+`new Promise(...)` values. IPC handler bodies are traced after every
+reachable registration, as code dispatched from the event loop, each with an
+equal share of the remaining budget.
+
+A top-level `globalThis[Symbol.for(key)] = value` publication in another
+source of the artifact is linked when it is the only publication of a key this
+source reads. Both sources are assumed to share one realm. Steps in the linked
+source carry its `source_path`; an IPC operation found there keeps the call of
+this source that reached it as `location` and the linked call as
+`linked_operation`.
+
+A substituted IPC operation reached only under unresolved predicates is
+reported with `guard_alternatives`: predicate conjunctions of which at least
+one holds when it occurs. Conjunctions that differ only by the polarity of one
+predicate evaluated in the same activation are merged; an operation reached on
+both sides is unconditional. A guarded registration also reached
+unconditionally from an outer call is not reported again. A unique channel
+match involving a guarded operation has pairing status `guarded`, is counted
+as `guarded_renderer_transmissions`, and receives no pairing edge.
 
 Electron API identity follows proven lexical module aliases. Namespace interop
 also preserves identity when the complete Rolldown helper operations, lexical
@@ -368,6 +476,32 @@ through namespace aliases; unrelated member writes do not discard observed API
 identity. This static check does
 not evaluate arbitrary call side effects or runtime registration. Missing findings
 do not establish that an application has no Electron boundary usage.
+
+An Electron API reached through one wrapper parameter is an inference recorded
+in `electron_identity` with `basis: "wrapper-parameter"`. The callee root must be
+a parameter, or a destructured parameter key, of a named function with one
+stable declaration. Every same-file direct call of that function is examined.
+An argument proves the export when it is a proven Electron expression, an
+object-literal member holding one, or one branch of `??`, `||`, `&&`, or a
+conditional. All proven arguments must agree on one export path. The record
+keeps the function, parameter, call-site count, proven argument locations, and
+the number of unresolved arguments. `call_sites_complete` is false when the
+function is also referenced other than as a callee. The syntax observation is
+unchanged, but the relationship from the containing source to the window or
+handler is an inference: `medium` confidence when every call site is known and
+resolved, otherwise `low`. Deeper wrapper chains, calls from other files, and
+writes to the parameter inside the wrapper are not examined for this identity;
+wrapper substitution follows deeper chains separately. This record summarizes
+every call site of the wrapper. Wrapped call paths instead bind each call site's
+own arguments, and use the summary only for a parameter that no call site on the
+path binds.
+
+A local binding with one stable initializer that is a `??`, `||`, `&&`,
+conditional, or object literal is examined the same way, for example
+`const api = options.electron ?? { BrowserWindow: electron.BrowserWindow }`.
+Its `electron_identity` has `basis: "local-alternatives"` with the binding,
+the initializer location, the proving value locations, and the number of
+unresolved values that runtime could select instead.
 
 IPC pairing is an inference, not an observation. A renderer `invoke` pairs only
 with one unique `ipcMain.handle`/`handleOnce` candidate on the same exact literal
@@ -440,7 +574,26 @@ After projection, it retains only the lexical module facts and exported return
 shapes needed to build application relationships. Full source IR does not stay
 resident for every file together. Callable ownership and contained-reference
 queries use per-file range indexes, while call sites use exact-range lookups.
-Existing node budgets and coverage reporting remain in effect.
+
+Semantic facts are bounded by serialized bytes, not node counts. One
+application Evidence may occupy the running heap divided by twelve, at most
+one V8 string: a consumer such as `compare_application_versions` holds two
+records, and measured consumers peak at about six times the Evidence bytes.
+Each source is offered the remaining budget in proportion to its share of the
+unanalyzed source bytes, also capped by the parent's free result heap. Within
+a source, nodes enter the graph when an admitted relation, fingerprint, or
+unknown frontier references them; relations are offered in projection order,
+then fingerprints, unknown frontiers, and unreferenced nodes. The first
+refusal closes that source, which keeps a connected source-ordered prefix.
+
+`semantic_graph.coverage.files` reports each source's status (`complete`,
+`truncated`, or `unavailable`), the byte budget a truncated source was offered,
+retained bytes, exact omitted node, relation, and fingerprint counts, and exact
+unknown-frontier totals by family and reason. The offer derives from the
+analyzing process's heap, so complete sources omit it and identical complete
+results keep identical Evidence across hosts. Families report retained and omitted unknown counts. Page
+`semantic_files` or `semantic_unknowns` with `inspect_analysis_view`, or select
+one source with `source_paths` to give it the whole budget.
 
 Progress identifies the source file being parsed and projected. Cancellation is
 checked between files and throughout result transfer. The owned analyzer can
@@ -483,20 +636,21 @@ default). Reaching it fails the current source with the same memory resource
 failure and reports `worker_process_memory_limit_bytes`, also a coverage limit;
 the next source starts a new analyzer. Bun elsewhere enforces no analyzer limit.
 
-The default semantic capacities are 100000 nodes across the application and
-20000 per source. Large bundles may explicitly select `max_semantic_nodes` and
+Callers may additionally cap semantic nodes with `max_semantic_nodes` and
 `max_semantic_nodes_per_file` (CLI: `--max-semantic-nodes` and
-`--max-semantic-nodes-per-file`), each from 1 to 1000000. The per-file offer is
-also bounded by the remaining application capacity. Raising these controls does
-not bypass worker heap, execution deadline or parent result admission. Truncated
-coverage reports both effective node ceilings; omitted relationships remain
-unknown.
+`--max-semantic-nodes-per-file`), each from 1 to 1000000. Neither has a
+default; omitted, only the serialized byte budget applies. The per-file offer
+is also bounded by the remaining application capacity, and a capped source
+keeps the same connected source-ordered prefix with exact omitted counts.
+These controls do not bypass the byte budget, worker heap, execution deadline
+or parent result admission. Truncated coverage reports each selected node
+ceiling alongside the byte budget.
 
 While sources remain, the sequential worker reserves one next compact static
-checkpoint at its 8 MiB bound with the same 6x retention expansion used at
+checkpoint at its 8 MiB bound with the same 2x retention expansion used at
 admission. Earlier checkpoints are already charged to retained bytes; the
 remaining inventory does not multiply the reserve. Streamed file transfers keep the default 512 MiB
-allowance, and can grow with the parent's offered retention budget (8x byte
+allowance, and can grow with the parent's offered retention budget (2x byte
 expansion), up to 2 GiB. Individual records remain bounded to 8 MiB. The parent
 still independently checks actual bytes, record overhead, digests and source
 identities before adopting results.
@@ -619,3 +773,13 @@ Unresolved HTML references retain their declaration, source range, and resolutio
 reason in the renderer observations.
 HTML script source ranges follow the HTML parser across LF, CRLF, and bare CR
 line endings, preserving UTF-16 columns.
+
+Global-symbol companion selection uses decoded candidate string arguments and a
+key-to-source index. Total companion text copies are bounded by the artifact's
+input-text byte count. A selection that does not fit is omitted in full with an
+explicit linking limitation; a partial publisher set never establishes uniqueness.
+Bridge member expansion examines each source-owned object once per exposure;
+cycles and repeated-object expansion remain explicit unknown members.
+`createRequire` observations retain loader and request syntax, but add-on paths
+remain unresolved while the loader's base filename is unavailable. REA does not
+substitute the calling source's directory for that base.

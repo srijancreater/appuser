@@ -40,7 +40,7 @@ describe("JavaScript source selection cancellation boundary", () => {
       );
       const worker = createJavaScriptSourceAnalysis(
         { heapMb: 512, timeoutMs: 30_000 },
-        1,
+        files.files.filter(({ path }) => sourcePaths.includes(path)),
       );
       let outcome: Awaited<
         ReturnType<typeof analyzeAndAdoptJavaScriptArtifactFiles>

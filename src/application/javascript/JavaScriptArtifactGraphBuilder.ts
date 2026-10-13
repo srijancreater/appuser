@@ -1,3 +1,4 @@
+import { electronStaticFindingCount } from "../../domain/javascript/electronStaticAnalysisTypes.js";
 import { ELECTRON_IDENTITY_LIMITATION } from "../../domain/javascript/javascriptElectronMemberWrites.js";
 import type { ArtifactInventorySnapshot } from "../../domain/artifactInventorySnapshot.js";
 import {
@@ -235,12 +236,7 @@ const graphLimitations = (
       count +
       (javascript === null
         ? 0
-        : javascript.electron.browser_windows.length +
-          javascript.electron.context_bridge_apis.length +
-          javascript.electron.ipc.length +
-          javascript.electron.sender_validations.length +
-          javascript.electron.utility_processes.length +
-          javascript.electron.native_addon_bindings.length),
+        : electronStaticFindingCount(javascript.electron)),
     0,
   );
   return [

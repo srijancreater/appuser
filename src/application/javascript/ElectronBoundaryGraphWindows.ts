@@ -3,6 +3,7 @@ import type {
   ElectronBrowserWindowFinding,
   ElectronContextBridgeFinding,
   ElectronUtilityProcessFinding,
+  ElectronWebviewAttachFinding,
 } from "../../domain/javascript/electronStaticAnalysisTypes.js";
 import type { JavaScriptArtifactFile } from "../../domain/javascript/javascriptArtifactFiles.js";
 import {
@@ -14,15 +15,13 @@ import {
   type JavaScriptArtifactGraphCoverage,
 } from "./JavaScriptArtifactGraphContext.js";
 import {
-  astObservationEvidence,
-  staticInferenceEvidence,
-} from "./JavaScriptArtifactGraphEvidence.js";
-import {
-  addElectronAstEdge,
+  addElectronApiEdge,
   addElectronInferenceEdge,
+  electronApiEvidence,
   electronFindingSourceNode,
   electronRangeKey,
 } from "./ElectronBoundaryGraphContext.js";
+import { astObservationEvidence } from "./JavaScriptArtifactGraphEvidence.js";
 import { resolveArtifactPathByContext } from "./JavaScriptArtifactPathResolution.js";
 
 interface FindingInput<Value> {
@@ -61,6 +60,16 @@ export const addElectronWindowBoundaries = (
       if (source !== undefined)
         addContextBridge({ context, file, source, value, coverage });
     }
+    for (const value of javascript.electron.webview_attachments) {
+      const source = electronFindingSourceNode(
+        context,
+        file,
+        value.module_key,
+        value.module_runtime,
+      );
+      if (source !== undefined)
+        addWebviewAttachment({ context, file, source, value, coverage });
+    }
     for (const value of javascript.electron.utility_processes) {
       const source = electronFindingSourceNode(
         context,
@@ -78,17 +87,19 @@ const addBrowserWindow = (
   input: FindingInput<ElectronBrowserWindowFinding>,
 ): void => {
   const { context, file, value, coverage } = input;
+  const view = value.api !== "BrowserWindow";
   const window = context.accumulator.addNode({
-    kind: "browser-window",
+    kind: view ? "web-contents-view" : "browser-window",
     identity: artifactLocalIdentity(
       file.sha256,
-      "electron-browser-window",
+      view ? "electron-web-contents-view" : "electron-browser-window",
       electronRangeKey(value.location),
     ),
     observations: [
       {
-        label: `BrowserWindow@${electronRangeKey(value.location)}`,
+        label: `${value.api}@${electronRangeKey(value.location)}`,
         properties: {
+          api: value.api,
           source_path: file.path,
           options_status: value.options_status,
           web_preferences_status: value.web_preferences_status,
@@ -96,13 +107,14 @@ const addBrowserWindow = (
           preload_path: value.preload_path,
           preload_resolution_context: value.preload_resolution_context,
           absence_means_default: false,
+          electron_identity: value.electron_identity,
         },
-        evidence: astObservationEvidence({
-          sha256: file.sha256,
-          path: file.path,
+        evidence: electronApiEvidence({
+          file,
           range: value.location,
           operation: "observe-browser-window-construction",
           coverage,
+          identity: value.electron_identity,
           limitations: [
             "Only explicitly present webPreferences are reported; omitted properties are not interpreted as Electron defaults.",
           ],
@@ -110,7 +122,7 @@ const addBrowserWindow = (
       },
     ],
   });
-  addElectronAstEdge(context, {
+  addElectronApiEdge(context, value.electron_identity, {
     source: input.source,
     target: window,
     file,
@@ -142,7 +154,7 @@ const addWindowPreload = (
     kind: "electron-preload",
     anchor: input.file,
     resolution,
-    mechanism: "BrowserWindow:webPreferences.preload",
+    mechanism: `${input.value.api}:webPreferences.preload`,
     range: input.value.location,
     coverage: input.coverage,
   });
@@ -192,17 +204,18 @@ const addContextBridge = (
           api_key_expression: value.api_key_expression,
           api_status: value.api_status,
           members: value.members,
+          conditional_members: value.conditional_members,
           unknown_members: value.unknown_members,
+          electron_identity: value.electron_identity,
           resolution_basis: value.resolution_basis ?? "direct-syntax",
         },
-        evidence: (value.resolution_basis === "wrapper-substitution"
-          ? staticInferenceEvidence
-          : astObservationEvidence)({
-          sha256: file.sha256,
-          path: file.path,
+        evidence: electronApiEvidence({
+          file,
+          resolutionBasis: value.resolution_basis,
           range: value.location,
           operation: "observe-context-bridge-api",
           coverage,
+          identity: value.electron_identity,
         }),
       },
     ],
@@ -218,8 +231,87 @@ const addContextBridge = (
     properties: {
       world: value.world,
       api_key: value.api_key,
-      resolution: value.api_key === null ? "dynamic" : "literal",
+      resolution:
+        value.api_key === null
+          ? "dynamic"
+          : value.api_key_expression === null
+            ? "literal"
+            : "derived",
     },
+  });
+};
+
+const addWebviewAttachment = (
+  input: FindingInput<ElectronWebviewAttachFinding>,
+): void => {
+  const { context, file, source, value, coverage } = input;
+  context.accumulator.addNode({
+    kind: source.kind,
+    identity: source.identity,
+    observations: [
+      {
+        label: "will-attach-webview listener",
+        properties: {
+          fact_kind: "webview-attach-handler",
+          handler_kind: value.handler_kind,
+          handler_location: value.handler_location,
+          writes: value.writes,
+          preload_path: value.preload_path,
+          preload_resolution_context: value.preload_resolution_context,
+          unknown_writes: value.unknown_writes,
+        },
+        evidence: astObservationEvidence({
+          sha256: file.sha256,
+          path: file.path,
+          range: value.location,
+          operation: "observe-webview-attach-handler",
+          coverage,
+          limitations: [
+            "The listener is recognized by its Electron event name; its receiver is not proven to be a webContents.",
+            "Writes are listed in source order without evaluating branches, so a write is not proven to execute.",
+          ],
+        }),
+      },
+    ],
+  });
+  if (value.preload_path === null || value.preload_resolution_context === null)
+    return;
+  const resolution = resolveArtifactPathByContext({
+    declaredPath: value.preload_path,
+    sourcePath: file.path,
+    context: value.preload_resolution_context,
+    files: context.filesByPath,
+  });
+  const role = createElectronRoleNode(context, {
+    kind: "electron-preload",
+    anchor: file,
+    resolution,
+    mechanism: "will-attach-webview:webPreferences.preload",
+    range: value.location,
+    coverage,
+  });
+  addElectronInferenceEdge(context, {
+    source,
+    target: role,
+    file,
+    range: value.location,
+    coverage,
+    relation: "loads",
+    operation: "associate-webview-preload",
+    properties: {
+      declared_path: value.preload_path,
+      resolution_context: resolution.resolution_context,
+      resolved_path: resolution.resolved_path,
+      resolution_status: resolution.resolution_status,
+      limitations: resolution.limitations,
+    },
+  });
+  linkElectronRoleToAsset(context, {
+    role,
+    anchor: file,
+    resolution,
+    range: value.location,
+    coverage,
   });
 };
 
@@ -242,13 +334,14 @@ const addUtilityProcess = (
           module_resolution_context: value.module_resolution_context,
           module_expression: value.module_expression,
           service_name: value.service_name,
+          electron_identity: value.electron_identity,
         },
-        evidence: astObservationEvidence({
-          sha256: file.sha256,
-          path: file.path,
+        evidence: electronApiEvidence({
+          file,
           range: value.location,
           operation: "observe-utility-process-fork",
           coverage,
+          identity: value.electron_identity,
         }),
       },
     ],

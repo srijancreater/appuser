@@ -180,11 +180,16 @@ const inspectCall = (
       accumulator,
     });
   }
-  const endpoint = endpointArgument(
-    name,
-    node.arguments,
-    node.callee,
-    openReceiverFacts.get(node.start ?? -1),
+  const endpoint = stringValue(
+    endpointArgument(
+      {
+        name,
+        args: node.arguments,
+        callee: node.callee,
+        receiverFact: openReceiverFacts.get(node.start ?? -1),
+      },
+      stringValue,
+    ),
   );
   if (endpoint !== undefined)
     addFinding({
